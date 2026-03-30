@@ -54,6 +54,7 @@ rust.buildPackage (
     inherit src cargoArtifacts;
     pname = "mls-validation-service";
     cargoExtraArgs = "--bin mls-validation-service";
+    doInstallCargoArtifacts = false;
     version = xmtp.mkVersion rust;
     doCheck = false;
   }

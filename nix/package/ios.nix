@@ -69,21 +69,20 @@ let
       envSetup = iosEnv.envSetup target;
 
       # Phase 1: Dep caching — rebuilds when Cargo.lock, Cargo.toml, or build.rs change.
-      cargoArtifacts = rust.buildDepsOnly (
-        commonArgs
+      cargoArtifacts = xmtp.base.mkCargoArtifacts rust false (
+        (removeAttrs commonArgs [ "src" ])
         // {
-          pname = "xmtpv3-deps-${target}";
           CARGO_BUILD_TARGET = target;
           # Impure: needs Xcode SDK for bindgen during dep compilation
           __noChroot = true;
-          cargoExtraArgs = "--target ${target} -p xmtpv3";
+          cargoExtraArgs = "-p xmtpv3";
           # envSetup is inlined in buildPhaseCargoCommand because crane's buildDepsOnly
           # strips preBuild hooks (it needs full control of the build phase to replace
           # source files with dummies). envSetup dynamically resolves the Xcode path
           # via xcode-select and sets DEVELOPER_DIR, SDKROOT, CC/CXX, and bindgen args.
           buildPhaseCargoCommand = ''
             ${envSetup}
-            cargo build --locked --release --target ${target} -p xmtpv3
+            cargo build --locked --release -p xmtpv3
           '';
         }
       );
@@ -96,6 +95,7 @@ let
         CARGO_BUILD_TARGET = target;
         __noChroot = true;
         pname = "xmtpv3-${target}";
+        doInstallCargoArtifacts = false;
         src = bindingsFileset;
         cargoExtraArgs = "--target ${target} -p xmtpv3";
         # preBuild works here (unlike buildDepsOnly) because buildPackage doesn't
@@ -129,6 +129,7 @@ let
       inherit version;
       cargoArtifacts = xmtp.base.mkCargoArtifacts rust false null;
       cargoExtraArgs = "-p xmtpv3";
+      doInstallCargoArtifacts = false;
       buildPhaseCargoCommand = ''
         ${nativeEnvSetup}
         cargo build --release -p xmtpv3
@@ -138,6 +139,9 @@ let
       doNotPostBuildInstallCargoBinaries = true;
       installPhaseCommand = ''
         ${nativeEnvSetup}
+        ls
+        ls build/source/
+        ls target/release
         # Generate Swift bindings using uniffi-bindgen.
         # This runs the ffi-uniffi-bindgen binary (built above) against the compiled
         # static library to extract the FFI interface and produce:
@@ -145,7 +149,7 @@ let
         #   - xmtpv3FFI.h: C header for the FFI layer
         #   - xmtpv3FFI.modulemap: Clang module map (renamed to module.modulemap)
         ${ffi-uniffi-bindgen} generate \
-          --library target/release/libxmtpv3.a \
+          --library build/source/target/release/libxmtpv3.a \
           --out-dir $TMPDIR/swift-out \
           --language swift
 
@@ -168,6 +172,7 @@ let
         pname = "xmtpv3-ios-libs";
         inherit version;
         dontUnpack = true;
+        doInstallCargoArtifacts = false;
         installPhase = ''
           mkdir -p $out/swift
           ${lib.concatMapStringsSep "\n" (target: ''

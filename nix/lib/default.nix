@@ -110,7 +110,6 @@
         wasm-bindgen-cli = pkgs.callPackage ./packages/wasm-bindgen-cli.nix { };
         napi-rs-cli = pkgs.callPackage ./packages/napi-rs-cli { };
         ffi-uniffi-bindgen = pkgs.callPackage ./packages/uniffi-bindgen.nix { };
-        swiftformat = pkgs.callPackage ./packages/swiftformat.nix { };
         swiftlint = pkgs.callPackage ./packages/swiftlint.nix { };
       };
     };
