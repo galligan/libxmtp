@@ -30,6 +30,7 @@
         # lib.recursiveUpdate lets imageCommon define other attributes in the `config` namesapce
         validation-service-image = pkgs.dockerTools.buildLayeredImage (
           lib.recursiveUpdate imageCommon {
+            contents = [ pkgs.cacert ];
             config.entrypoint = [
               "${self'.packages.mls-validation-service-x86_64-unknown-linux-musl}/bin/mls-validation-service"
             ];
@@ -38,6 +39,7 @@
         );
         validation-service-image-aarch64-unknown-linux-musl = pkgs.dockerTools.buildLayeredImage (
           lib.recursiveUpdate imageCommon {
+            contents = [ pkgs.cacert ];
             config.entrypoint = [
               "${self'.packages.mls-validation-service-aarch64-unknown-linux-musl}/bin/mls-validation-service"
             ];
