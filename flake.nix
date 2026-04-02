@@ -50,6 +50,7 @@
         ./nix/fmt.nix
         ./nix/node-packages.nix
         ./nix/android-packages.nix
+        ./nix/ios-packages.nix
       ];
       perSystem =
         {
@@ -75,29 +76,29 @@
             inherit (pkgs) napi-rs-cli wasm-bindgen-cli;
             wasm-bindings = (pkgs.callPackage ./nix/package/wasm.nix { }).bin;
             wasm-bindings-test = (pkgs.callPackage ./nix/package/wasm.nix { test = true; }).bin;
-          }
-          // lib.optionalAttrs pkgs.stdenv.isDarwin {
-            # stdenvNoCC is passed to callPackage (for the aggregate derivation).
-            # This avoids Nix's apple-sdk and cc-wrapper,
-            # which inject -mmacos-version-min flags that
-            # conflict with iOS cross-compilation. The builds are impure (__noChroot)
-            # and use the system Xcode SDK directly via ios-env.nix paths.
-            ios-libs =
-              (pkgs.callPackage ./nix/package/ios.nix {
-                stdenv = pkgs.stdenvNoCC;
-              }).aggregate;
-            # iOS bindings - simulator + host macOS only (fast dev/CI builds)
-            ios-libs-fast =
-              (
-                (pkgs.callPackage ./nix/package/ios.nix {
-                  stdenv = pkgs.stdenvNoCC;
-                }).mkIos
-                [
-                  "aarch64-apple-darwin"
-                  "aarch64-apple-ios-sim"
-                ]
-              ).aggregate;
           };
+          # // lib.optionalAttrs pkgs.stdenv.isDarwin {
+          #   # stdenvNoCC is passed to callPackage (for the aggregate derivation).
+          #   # This avoids Nix's apple-sdk and cc-wrapper,
+          #   # which inject -mmacos-version-min flags that
+          #   # conflict with iOS cross-compilation. The builds are impure (__noChroot)
+          #   # and use the system Xcode SDK directly via ios-env.nix paths.
+          #   ios-libs =
+          #     (pkgs.callPackage ./nix/package/ios.nix {
+          #       stdenv = pkgs.stdenvNoCC;
+          #     }).aggregate;
+          #   # iOS bindings - simulator + host macOS only (fast dev/CI builds)
+          #   ios-libs-fast =
+          #     (
+          #       (pkgs.callPackage ./nix/package/ios.nix {
+          #         stdenv = pkgs.stdenvNoCC;
+          #       }).mkIos
+          #       [
+          #         "aarch64-apple-darwin"
+          #         "aarch64-apple-ios-sim"
+          #       ]
+          #     ).aggregate;
+          # };
         };
     };
 }
