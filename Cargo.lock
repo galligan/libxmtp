@@ -17604,6 +17604,7 @@ dependencies = [
  "alloy",
  "async-trait",
  "bincode 1.3.3",
+ "bon",
  "bytes",
  "chrono",
  "const-hex",
@@ -17681,6 +17682,7 @@ dependencies = [
 name = "xmtp_mls_common"
 version = "1.10.0"
 dependencies = [
+ "bon",
  "const-hex",
  "openmls",
  "proptest",
