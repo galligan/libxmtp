@@ -86,26 +86,29 @@ impl<Context> IdentityUpdates<Context> {
 }
 
 #[doc(hidden)]
-pub trait IdentityUpdateContext {
+pub trait IdentityStateContext {
     type Db: XmtpDb;
     type ApiClient: XmtpApi;
 
     fn db(&self) -> <Self::Db as XmtpDb>::DbQuery;
     fn api(&self) -> &ApiClientWrapper<Self::ApiClient>;
     fn scw_verifier(&self) -> Arc<Box<dyn SmartContractSignatureVerifier>>;
+    fn installation_id(&self) -> InstallationId {
+        panic!("installation_id() not implemented for this context")
+    }
+}
+
+#[doc(hidden)]
+pub trait IdentityUpdateContext: IdentityStateContext {
     fn identity(&self) -> &Identity;
     fn worker_events(&self) -> &broadcast::Sender<SyncWorkerEvent>;
 
     fn inbox_id(&self) -> InboxIdRef<'_> {
         self.identity().inbox_id()
     }
-
-    fn installation_id(&self) -> InstallationId {
-        self.identity().installation_id()
-    }
 }
 
-impl<Context> IdentityUpdateContext for Context
+impl<Context> IdentityStateContext for Context
 where
     Context: XmtpSharedContext,
 {
@@ -124,6 +127,15 @@ where
         XmtpSharedContext::scw_verifier(self)
     }
 
+    fn installation_id(&self) -> InstallationId {
+        XmtpSharedContext::installation_id(self)
+    }
+}
+
+impl<Context> IdentityUpdateContext for Context
+where
+    Context: XmtpSharedContext,
+{
     fn identity(&self) -> &Identity {
         XmtpSharedContext::identity(self)
     }
@@ -244,7 +256,7 @@ pub async fn batch_get_association_state_with_verifier(
 
 impl<'a, Context> IdentityUpdates<Context>
 where
-    Context: IdentityUpdateContext,
+    Context: IdentityStateContext,
 {
     /// Get the association state for all provided `inbox_id`/optional `sequence_id` tuples, using the cache when available
     /// If the association state is not available in the cache, this falls back to reconstructing the association state
@@ -357,6 +369,12 @@ where
         Ok(initial_state.diff(&final_state))
     }
 
+}
+
+impl<'a, Context> IdentityUpdates<Context>
+where
+    Context: IdentityUpdateContext,
+{
     /// Generate a `CreateInbox` signature request for the given wallet address.
     /// If no nonce is provided, use 0
     #[tracing::instrument(level = "trace", skip_all)]
@@ -534,7 +552,12 @@ where
 
         Ok(())
     }
+}
 
+impl<'a, Context> IdentityUpdates<Context>
+where
+    Context: IdentityStateContext,
+{
     /// Given two group memberships and the diff, get the list of installations that were added or removed
     /// between the two membership states.
     #[tracing::instrument(level = "trace", skip_all)]

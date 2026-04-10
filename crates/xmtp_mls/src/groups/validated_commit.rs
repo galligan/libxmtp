@@ -10,7 +10,7 @@ use super::{
 use crate::{
     context::XmtpSharedContext,
     identity_updates::{
-        IdentityUpdateContext, IdentityUpdates, InstallationDiff, InstallationDiffError,
+        IdentityStateContext, IdentityUpdates, InstallationDiff, InstallationDiffError,
     },
     utils::VersionInfo,
 };
@@ -49,7 +49,7 @@ use xmtp_proto::xmtp::{
     },
 };
 
-pub(crate) trait CommitValidationContext: IdentityUpdateContext {
+pub(crate) trait CommitValidationContext: IdentityStateContext {
     fn version_info(&self) -> &VersionInfo;
 }
 
