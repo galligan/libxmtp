@@ -1,6 +1,32 @@
 use super::*;
 use crate::groups::group_membership::GroupMembership;
 use crate::identity_updates::{IdentityStateContext, load_identity_updates};
+use openmls_traits::signatures::Signer;
+
+fn build_group_context_extensions_publish_data<S, SignerT>(
+    storage: &S,
+    openmls_group: &mut OpenMlsGroup,
+    extensions: Extensions<GroupContext>,
+    signer: SignerT,
+    should_send_push_notification: bool,
+) -> Result<PublishIntentData, GroupError>
+where
+    S: XmtpMlsStorageProvider,
+    SignerT: Signer,
+{
+    let ((commit, _, _), staged_commit, group_epoch) =
+        generate_commit_with_rollback(storage, openmls_group, |group, provider| {
+            group.update_group_context_extensions(provider, extensions.clone(), &signer)
+        })?;
+
+    Ok(PublishIntentData {
+        payloads_to_publish: vec![commit.tls_serialize_detached()?],
+        staged_commit,
+        post_commit_action: None,
+        should_send_push_notification,
+        group_epoch,
+    })
+}
 
 async fn refresh_membership_sequence_ids<Context>(
     context: &Context,
@@ -242,22 +268,13 @@ where
                 )?;
 
                 let keys = self.context.identity().installation_keys.clone();
-                let ((commit, _, _), staged_commit, group_epoch) =
-                    generate_commit_with_rollback(storage, openmls_group, |group, provider| {
-                        group.update_group_context_extensions(
-                            provider,
-                            mutable_metadata_extensions.clone(),
-                            &keys,
-                        )
-                    })?;
-
-                Ok(Some(PublishIntentData {
-                    payloads_to_publish: vec![commit.tls_serialize_detached()?],
-                    staged_commit,
-                    post_commit_action: None,
-                    should_send_push_notification: intent.should_push,
-                    group_epoch,
-                }))
+                Ok(Some(build_group_context_extensions_publish_data(
+                    storage,
+                    openmls_group,
+                    mutable_metadata_extensions,
+                    keys,
+                    intent.should_push,
+                )?))
             }
             IntentKind::UpdateAdminList => {
                 let admin_list_update_intent =
@@ -268,22 +285,13 @@ where
                 )?;
 
                 let keys = self.context.identity().installation_keys.clone();
-                let ((commit, _, _), staged_commit, group_epoch) =
-                    generate_commit_with_rollback(storage, openmls_group, |group, provider| {
-                        group.update_group_context_extensions(
-                            provider,
-                            mutable_metadata_extensions.clone(),
-                            &keys,
-                        )
-                    })?;
-
-                Ok(Some(PublishIntentData {
-                    payloads_to_publish: vec![commit.tls_serialize_detached()?],
-                    staged_commit,
-                    post_commit_action: None,
-                    should_send_push_notification: intent.should_push,
-                    group_epoch,
-                }))
+                Ok(Some(build_group_context_extensions_publish_data(
+                    storage,
+                    openmls_group,
+                    mutable_metadata_extensions,
+                    keys,
+                    intent.should_push,
+                )?))
             }
             IntentKind::UpdatePermission => {
                 let update_permissions_intent =
@@ -294,22 +302,13 @@ where
                 )?;
 
                 let keys = self.context.identity().installation_keys.clone();
-                let ((commit, _, _), staged_commit, group_epoch) =
-                    generate_commit_with_rollback(storage, openmls_group, |group, provider| {
-                        group.update_group_context_extensions(
-                            provider,
-                            group_permissions_extensions.clone(),
-                            &keys,
-                        )
-                    })?;
-
-                Ok(Some(PublishIntentData {
-                    payloads_to_publish: vec![commit.tls_serialize_detached()?],
-                    staged_commit,
-                    post_commit_action: None,
-                    should_send_push_notification: intent.should_push,
-                    group_epoch,
-                }))
+                Ok(Some(build_group_context_extensions_publish_data(
+                    storage,
+                    openmls_group,
+                    group_permissions_extensions,
+                    keys,
+                    intent.should_push,
+                )?))
             }
             IntentKind::ReaddInstallations => {
                 let intent_data = ReaddInstallationsIntentData::try_from(intent.data.as_slice())?;
