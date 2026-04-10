@@ -1,10 +1,32 @@
 use super::*;
 use xmtp_common::{MaybeSend, MaybeSync};
+use xmtp_db::StorageError;
 
 pub(super) trait PauseResolutionContext: MaybeSend + MaybeSync {
     fn paused_group_version(&self, group_id: &[u8]) -> Result<Option<String>, GroupError>;
     fn unpause_group(&self, group_id: &[u8]) -> Result<(), GroupError>;
     fn current_pkg_version(&self) -> &str;
+}
+
+#[derive(Debug)]
+pub(super) enum IntentResolutionStatus {
+    Processed,
+    Deleted,
+    Error {
+        kind: IntentKind,
+    },
+    Pending {
+        state: IntentState,
+        kind: IntentKind,
+    },
+}
+
+pub(super) trait IntentResolutionQueryContext: MaybeSend + MaybeSync {
+    fn latest_resolvable_intent_id(&self, group_id: &[u8]) -> Result<Option<ID>, StorageError>;
+    fn intent_resolution_status(
+        &self,
+        intent_id: &ID,
+    ) -> Result<IntentResolutionStatus, StorageError>;
 }
 
 impl<Context> PauseResolutionContext for Context
@@ -21,6 +43,46 @@ where
 
     fn current_pkg_version(&self) -> &str {
         self.version_info().pkg_version()
+    }
+}
+
+impl<Context> IntentResolutionQueryContext for Context
+where
+    Context: XmtpSharedContext,
+{
+    fn latest_resolvable_intent_id(&self, group_id: &[u8]) -> Result<Option<ID>, StorageError> {
+        Ok(self
+            .db()
+            .find_group_intents(
+                group_id.to_vec(),
+                Some(vec![IntentState::ToPublish, IntentState::Published]),
+                None,
+            )?
+            .last()
+            .map(|intent| intent.id))
+    }
+
+    fn intent_resolution_status(
+        &self,
+        intent_id: &ID,
+    ) -> Result<IntentResolutionStatus, StorageError> {
+        Ok(
+            match Fetch::<StoredGroupIntent>::fetch(&self.db(), intent_id)? {
+                Some(StoredGroupIntent {
+                    state: IntentState::Processed,
+                    ..
+                }) => IntentResolutionStatus::Processed,
+                Some(StoredGroupIntent {
+                    state: IntentState::Error,
+                    kind,
+                    ..
+                }) => IntentResolutionStatus::Error { kind },
+                Some(StoredGroupIntent { state, kind, .. }) => {
+                    IntentResolutionStatus::Pending { state, kind }
+                }
+                None => IntentResolutionStatus::Deleted,
+            },
+        )
     }
 }
 
@@ -78,17 +140,11 @@ where
         tracing::instrument(level = "trace", skip_all)
     )]
     pub(crate) async fn sync_until_last_intent_resolved(&self) -> Result<SyncSummary, GroupError> {
-        let intents = self.context.db().find_group_intents(
-            self.group_id.clone(),
-            Some(vec![IntentState::ToPublish, IntentState::Published]),
-            None,
-        )?;
-
-        let Some(intent) = intents.last() else {
+        let Some(intent_id) = self.context.latest_resolvable_intent_id(&self.group_id)? else {
             return Ok(Default::default());
         };
 
-        self.sync_until_intent_resolved(intent.id).await
+        self.sync_until_intent_resolved(intent_id).await
     }
 
     /**
@@ -142,7 +198,6 @@ where
         intent_id: ID,
     ) -> Result<SyncSummary, GroupError> {
         let mut summary = SyncSummary::default();
-        let db = self.context.db();
 
         let time_spent = xmtp_common::time::Instant::now();
         let backoff = ExponentialBackoff::builder()
@@ -172,15 +227,12 @@ where
                     summary.extend(s);
                 }
             }
-            match Fetch::<StoredGroupIntent>::fetch(&db, &intent_id) {
-                Ok(Some(StoredGroupIntent {
-                    state: IntentState::Processed,
-                    ..
-                })) => {
+            match self.context.intent_resolution_status(&intent_id) {
+                Ok(IntentResolutionStatus::Processed) => {
                     // This is expected, we mark intents as processed on success.
                     return Ok(summary);
                 }
-                Ok(None) => {
+                Ok(IntentResolutionStatus::Deleted) => {
                     // This is somewhat expected, we used to delete intents on success.
                     tracing::warn!(
                         "Intent was deleted when it should have been marked as processed.\
@@ -188,12 +240,7 @@ where
                     );
                     return Ok(summary);
                 }
-
-                Ok(Some(StoredGroupIntent {
-                    state: IntentState::Error,
-                    kind,
-                    ..
-                })) => {
+                Ok(IntentResolutionStatus::Error { kind }) => {
                     log_event!(
                         Event::GroupSyncIntentErrored,
                         self.context.installation_id(),
@@ -203,7 +250,7 @@ where
                     );
                     return Err(GroupError::from(summary));
                 }
-                Ok(Some(StoredGroupIntent { state, kind, .. })) => {
+                Ok(IntentResolutionStatus::Pending { state, kind }) => {
                     log_event!(
                         Event::GroupSyncIntentRetry,
                         self.context.installation_id(),
