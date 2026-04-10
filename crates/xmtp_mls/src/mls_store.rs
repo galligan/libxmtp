@@ -59,22 +59,6 @@ impl<Context> MlsStore<Context>
 where
     Context: XmtpSharedContext,
 {
-    /// Query for welcome messages that have a `sequence_id` > than the highest cursor
-    /// found in the local database
-    pub(crate) async fn query_welcome_messages(
-        &self,
-    ) -> Result<Vec<WelcomeMessage>, MlsStoreError> {
-        let installation_id = self.context.installation_id();
-
-        let welcomes = self
-            .context
-            .api()
-            .query_welcome_messages(installation_id)
-            .await?;
-        tracing::info!("returning {} welcomes", welcomes.len());
-        Ok(welcomes)
-    }
-
     /// Query for group messages that have a `sequence_id` > than the highest cursor
     /// found in the local database
     pub(crate) async fn query_group_messages(
@@ -144,6 +128,22 @@ impl<Context> MlsStore<Context>
 where
     Context: IdentityStateContext,
 {
+    /// Query for welcome messages that have a `sequence_id` > than the highest cursor
+    /// found in the local database
+    pub(crate) async fn query_welcome_messages(
+        &self,
+    ) -> Result<Vec<WelcomeMessage>, MlsStoreError> {
+        let installation_id = self.context.installation_id();
+
+        let welcomes = self
+            .context
+            .api()
+            .query_welcome_messages(installation_id)
+            .await?;
+        tracing::info!("returning {} welcomes", welcomes.len());
+        Ok(welcomes)
+    }
+
     /// Fetches the current key package from the network for each of the `installation_id`s specified
     #[tracing::instrument(level = "trace", skip_all)]
     pub async fn get_key_packages_for_installation_ids(
