@@ -4,7 +4,6 @@ use crate::groups::InitialMembershipValidator;
 use crate::groups::ValidateGroupMembership;
 use crate::groups::XmtpWelcome;
 use crate::groups::{GroupError, MlsGroup};
-use crate::identity_updates::IdentityStateContext;
 use crate::intents::ProcessIntentError;
 use crate::mls_store::MlsStore;
 use futures::stream::{self, FuturesUnordered, StreamExt};
@@ -14,8 +13,10 @@ use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
+use xmtp_api::{ApiClientWrapper, XmtpApi};
 use xmtp_common::Event;
 use xmtp_common::{Retry, retry_async};
+use xmtp_db::XmtpDb;
 use xmtp_db::refresh_state::EntityKind;
 use xmtp_db::{consent_record::ConsentState, group::GroupQueryArgs, prelude::*};
 use xmtp_macro::log_event;
@@ -322,14 +323,39 @@ where
     }
 }
 
-impl<Context> WelcomeService<Context>
+#[doc(hidden)]
+trait WelcomeSyncQueryContext {
+    type Db: XmtpDb;
+    type ApiClient: XmtpApi;
+
+    fn db(&self) -> <Self::Db as XmtpDb>::DbQuery;
+    fn api(&self) -> &ApiClientWrapper<Self::ApiClient>;
+}
+
+impl<Context> WelcomeSyncQueryContext for Context
 where
-    Context: IdentityStateContext,
+    Context: XmtpSharedContext,
 {
+    type Db = Context::Db;
+    type ApiClient = Context::ApiClient;
+
+    fn db(&self) -> <Self::Db as XmtpDb>::DbQuery {
+        XmtpSharedContext::db(self)
+    }
+
+    fn api(&self) -> &ApiClientWrapper<Self::ApiClient> {
+        XmtpSharedContext::api(self)
+    }
+}
+
+impl<Context> WelcomeService<Context> {
     async fn filter_groups_needing_sync(
         &self,
         groups: Vec<MlsGroup<Context>>,
-    ) -> Result<Vec<MlsGroup<Context>>, GroupError> {
+    ) -> Result<Vec<MlsGroup<Context>>, GroupError>
+    where
+        Context: WelcomeSyncQueryContext,
+    {
         let db = self.context.db();
         let api = self.context.api();
 

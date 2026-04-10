@@ -2789,8 +2789,21 @@ pub fn filter_inbox_ids_needing_updates<'a>(
     Ok(needs_update)
 }
 
+pub(crate) trait DmValidationContext {
+    fn inbox_id(&self) -> InboxIdRef<'_>;
+}
+
+impl<Context> DmValidationContext for Context
+where
+    Context: XmtpSharedContext,
+{
+    fn inbox_id(&self) -> InboxIdRef<'_> {
+        XmtpSharedContext::inbox_id(self)
+    }
+}
+
 fn validate_dm_group(
-    context: impl XmtpSharedContext,
+    context: impl DmValidationContext,
     mls_group: &OpenMlsGroup,
     added_by_inbox: &str,
 ) -> Result<(), MetadataPermissionsError> {
@@ -2812,10 +2825,10 @@ fn validate_dm_group(
 
     // 3) If the inbox that added this group is our inbox, make sure that
     //    one of the `dm_members` is our inbox id
-    let identity = context.identity();
-    if added_by_inbox == identity.inbox_id() {
-        if !(dm_members.member_one_inbox_id == identity.inbox_id()
-            || dm_members.member_two_inbox_id == identity.inbox_id())
+    let inbox_id = context.inbox_id();
+    if added_by_inbox == inbox_id {
+        if !(dm_members.member_one_inbox_id == inbox_id
+            || dm_members.member_two_inbox_id == inbox_id)
         {
             return Err(DmValidationError::OurInboxMustBeMember.into());
         }
@@ -2824,8 +2837,8 @@ fn validate_dm_group(
 
     // 4) Otherwise, make sure one of the `dm_members` is ours, and the other is `added_by_inbox`
     let is_expected_pair = (dm_members.member_one_inbox_id == added_by_inbox
-        && dm_members.member_two_inbox_id == identity.inbox_id())
-        || (dm_members.member_one_inbox_id == identity.inbox_id()
+        && dm_members.member_two_inbox_id == inbox_id)
+        || (dm_members.member_one_inbox_id == inbox_id
             && dm_members.member_two_inbox_id == added_by_inbox);
 
     if !is_expected_pair {
