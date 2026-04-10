@@ -180,6 +180,21 @@ impl CommitParticipant {
             mutable_metadata,
         ))
     }
+
+    /// Project this participant into the admin/super-admin view that the
+    /// component-permission validator consumes.
+    fn actor_authority(&self) -> xmtp_mls_common::app_data::validation::ActorAuthority {
+        xmtp_mls_common::app_data::validation::ActorAuthority {
+            is_admin: self.is_admin,
+            is_super_admin: self.is_super_admin,
+        }
+    }
+}
+
+impl From<&CommitParticipant> for xmtp_mls_common::app_data::validation::ActorAuthority {
+    fn from(participant: &CommitParticipant) -> Self {
+        participant.actor_authority()
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -393,6 +408,17 @@ impl ValidatedCommit {
         if staged_commit.psk_proposals().any(|_| true) {
             return Err(CommitValidationError::NoPSKSupport);
         }
+
+        // Inline AppDataUpdate proposals carried by a commit never flow
+        // through `validate_proposal()` — that path only handles standalone
+        // proposal-by-reference messages — so this is where their
+        // permission check lives.
+        validate_inline_app_data_update_proposals(
+            staged_commit,
+            openmls_group,
+            &immutable_metadata,
+            &mutable_metadata,
+        )?;
 
         // Get the installations actually added and removed in the commit
         let ProposalChanges {
@@ -943,6 +969,139 @@ fn validate_membership_diff(
     Ok(())
 }
 
+/// Validate a single `AppDataUpdate` (component_id + operation) against
+/// `registry` on behalf of `actor`.
+///
+/// Shared core for both validator entry points:
+/// [`validate_proposal`] (standalone proposal-by-reference messages) and
+/// [`validate_inline_app_data_update_proposals`] (inline proposals inside
+/// commits). Both paths must enforce identical permission checks; lifting
+/// the loop here keeps them in lockstep so a future change can't drift
+/// the two implementations apart.
+///
+/// Returns `Err(InsufficientPermissions)` on the first failure (expand or
+/// per-element check) so the caller can reject the wider message wholesale.
+fn validate_one_app_data_update(
+    component_id: xmtp_mls_common::app_data::component_id::ComponentId,
+    operation: &openmls::messages::proposals::AppDataUpdateOperation,
+    actor: xmtp_mls_common::app_data::validation::ActorAuthority,
+    proposer_inbox_id: &str,
+    registry: &xmtp_mls_common::app_data::component_registry::ComponentRegistry,
+) -> Result<(), CommitValidationError> {
+    use super::app_data::component_source::expand_app_data_update_to_changes;
+    use xmtp_mls_common::app_data::validation::{ComponentChange, validate_component_write};
+
+    let changes = expand_app_data_update_to_changes(component_id, operation).map_err(|e| {
+        tracing::warn!(
+            proposer_inbox_id,
+            component_id = %component_id,
+            error = %e,
+            "AppDataUpdate proposal rejected: failed to expand payload"
+        );
+        CommitValidationError::InsufficientPermissions
+    })?;
+
+    for change in &changes {
+        // bon::Builder uses type-state encoding for set fields, so each
+        // `.field(_)` call returns a different builder type. We can't
+        // reassign back to the same binding, so the conditional `new_value`
+        // goes through `maybe_new_value` (which accepts `Option<&[u8]>`).
+        let cc = ComponentChange::builder()
+            .component_id(component_id)
+            .op(change.op)
+            .actor(actor)
+            .maybe_new_value(change.value.as_deref())
+            .build();
+
+        if let Err(e) = validate_component_write(&cc, registry) {
+            tracing::warn!(
+                proposer_inbox_id,
+                component_id = %component_id,
+                op = %change.op,
+                error = %e,
+                "AppDataUpdate proposal rejected"
+            );
+            return Err(CommitValidationError::InsufficientPermissions);
+        }
+    }
+
+    Ok(())
+}
+
+/// Validate every inline `AppDataUpdate` proposal carried by `staged_commit`
+/// against the group's component registry.
+///
+/// `validate_proposal()` covers the standalone-proposal-by-reference path
+/// (proposals that arrive as their own message), but commits that bundle
+/// `AppDataUpdate` proposals inline never go through `validate_proposal` —
+/// they go through `from_staged_commit`. Without this helper, inline
+/// `AppDataUpdate` proposals would bypass `validate_component_write`
+/// entirely, since `extract_metadata_changes` only inspects the legacy
+/// mutable-metadata extension.
+///
+/// Delegates the per-proposal permission check to
+/// [`validate_one_app_data_update`] so the core logic stays shared with
+/// the standalone-proposal path in [`validate_proposal`].
+fn validate_inline_app_data_update_proposals(
+    staged_commit: &StagedCommit,
+    openmls_group: &OpenMlsGroup,
+    immutable_metadata: &GroupMetadata,
+    mutable_metadata: &GroupMutableMetadata,
+) -> Result<(), CommitValidationError> {
+    use super::app_data::load_component_registry;
+    use std::collections::HashMap;
+    use xmtp_mls_common::app_data::{component_id::ComponentId, validation::ActorAuthority};
+
+    // Peek first: the common case is zero AppDataUpdate proposals, in
+    // which case we skip the registry load and the per-proposer work
+    // entirely. This runs on every commit's validation path.
+    let mut proposals = staged_commit.app_data_update_proposals().peekable();
+    if proposals.peek().is_none() {
+        return Ok(());
+    }
+
+    let registry = load_component_registry(openmls_group);
+    // A single commit's bootstrap can carry multiple AppDataUpdate proposals
+    // from the same leaf; cache extracted `CommitParticipant`s so we don't
+    // re-walk the admin lists and re-parse the credential for every one.
+    let mut participants: HashMap<LeafNodeIndex, CommitParticipant> = HashMap::new();
+
+    for queued in proposals {
+        let app_data = queued.app_data_update_proposal();
+        let proposer_leaf = match queued.sender() {
+            Sender::Member(leaf_index) => leaf_index,
+            // External senders and new-member proposals can't propose
+            // AppDataUpdate by design — bail with an actor error so the
+            // caller surfaces the right reason in the rejection.
+            Sender::External(_) | Sender::NewMemberCommit | Sender::NewMemberProposal => {
+                return Err(CommitValidationError::ActorNotMember);
+            }
+        };
+        let proposer = match participants.get(proposer_leaf) {
+            Some(cached) => cached,
+            None => {
+                let fresh = extract_commit_participant(
+                    proposer_leaf,
+                    openmls_group,
+                    immutable_metadata,
+                    mutable_metadata,
+                )?;
+                participants.entry(*proposer_leaf).or_insert(fresh)
+            }
+        };
+
+        validate_one_app_data_update(
+            ComponentId::from(app_data.component_id()),
+            app_data.operation(),
+            ActorAuthority::from(proposer),
+            &proposer.inbox_id,
+            &registry,
+        )?;
+    }
+
+    Ok(())
+}
+
 /// Extracts the [`CommitParticipant`] from the [`LeafNodeIndex`]
 fn extract_commit_participant(
     leaf_index: &LeafNodeIndex,
@@ -1441,8 +1600,24 @@ pub fn validate_proposal(
         Proposal::Custom(_) => {
             return Err(unsupported_error());
         }
-        Proposal::AppDataUpdate(_) => {
-            return Err(unsupported_error());
+        Proposal::AppDataUpdate(app_data) => {
+            use super::app_data::load_component_registry;
+            use xmtp_mls_common::app_data::{
+                component_id::ComponentId, validation::ActorAuthority,
+            };
+
+            let registry = load_component_registry(openmls_group);
+
+            // Delegate to the shared helper so the inline-in-commit path
+            // (`validate_inline_app_data_update_proposals`) and this
+            // standalone-proposal-by-reference path can't drift apart.
+            validate_one_app_data_update(
+                ComponentId::from(app_data.component_id()),
+                app_data.operation(),
+                ActorAuthority::from(&proposer),
+                &proposer.inbox_id,
+                &registry,
+            )?;
         }
         Proposal::AppEphemeral(_) => {
             return Err(unsupported_error());

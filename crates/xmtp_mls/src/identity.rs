@@ -856,11 +856,19 @@ impl XmtpKeyPackageBuilder {
                     .retain(|e| *e != ExtensionType::Unknown(PROPOSAL_SUPPORT_EXTENSION_ID));
             }
         }
+        // Advertise both `GroupContextExtensions` (required by all groups)
+        // and `AppDataUpdate` (used by the new app-data path) so this client
+        // can join groups that commit AppDataUpdate proposals. Required-vs-
+        // supported is enforced by the group's RequiredCapabilities, not by
+        // this leaf-node list, so advertising more is always safe.
         let capabilities = Capabilities::new(
             None,
             Some(&[CIPHERSUITE]),
             Some(&capability_extensions),
-            Some(&[ProposalType::GroupContextExtensions]),
+            Some(&[
+                ProposalType::GroupContextExtensions,
+                ProposalType::AppDataUpdate,
+            ]),
             None,
         );
 

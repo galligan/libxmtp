@@ -2544,3 +2544,386 @@ async fn test_add_member_after_sequence_id_bump_with_proposals_enabled() {
     assert_eq!(bo_members.len(), 3, "Bo should see 3 members");
     assert_eq!(caro_members.len(), 3, "Caro should see 3 members");
 }
+
+// =============================================================================
+// AppDataUpdate Path Tests
+// =============================================================================
+//
+// These tests exercise the new app-data-update flow that activates when a
+// group has flipped `proposals_enabled`. They confirm that:
+// 1. `update_group_name` and friends still work end-to-end (sender → receiver)
+// 2. The capability-gated read accessors return the new value
+// 3. The legacy path is unchanged for groups without `proposals_enabled`
+//
+// The component registry is empty in phase 1, so the receiver-side validator
+// denies-by-default for non-hardcoded components. These tests inject a
+// permissive registry for the duration of the test by scoping
+// `TEST_REGISTRY_OVERRIDE` (a tokio task-local) around the test body,
+// mirroring how production code will eventually load a populated registry
+// from the AppData dictionary.
+
+/// Build a `ComponentRegistry` that allows updates on `GROUP_NAME`,
+/// `GROUP_DESCRIPTION`, `GROUP_IMAGE_URL`, and `ADMIN_LIST`. Tests install
+/// it via `TEST_REGISTRY_OVERRIDE.scope(reg, async { … }).await`.
+fn build_permissive_test_registry()
+-> xmtp_mls_common::app_data::component_registry::ComponentRegistry {
+    use xmtp_mls_common::app_data::{
+        component_id::ComponentId,
+        component_permissions::component_permissions,
+        component_registry::{ComponentRegistry, new_component_metadata},
+    };
+    use xmtp_proto::xmtp::mls::message_contents::{
+        ComponentType, MetadataPolicy as MetadataPolicyProto,
+        metadata_policy::{Kind as MetadataPolicyKind, MetadataBasePolicy},
+    };
+
+    fn allow() -> MetadataPolicyProto {
+        MetadataPolicyProto {
+            kind: Some(MetadataPolicyKind::Base(MetadataBasePolicy::Allow as i32)),
+        }
+    }
+    fn admin_only() -> MetadataPolicyProto {
+        MetadataPolicyProto {
+            kind: Some(MetadataPolicyKind::Base(
+                MetadataBasePolicy::AllowIfAdmin as i32,
+            )),
+        }
+    }
+
+    let mut reg = ComponentRegistry::new();
+    for id in [
+        ComponentId::GROUP_NAME,
+        ComponentId::GROUP_DESCRIPTION,
+        ComponentId::GROUP_IMAGE_URL,
+    ] {
+        reg.set(
+            id,
+            new_component_metadata(
+                component_permissions()
+                    .insert(allow())
+                    .update(allow())
+                    .delete(allow())
+                    .call(),
+                ComponentType::Bytes,
+            ),
+        )
+        .unwrap();
+    }
+    // ADMIN_LIST is a constrained component — only admin/super-admin policies
+    // are accepted at registry-set time.
+    reg.set(
+        ComponentId::ADMIN_LIST,
+        new_component_metadata(
+            component_permissions()
+                .insert(admin_only())
+                .update(admin_only())
+                .delete(admin_only())
+                .call(),
+            ComponentType::SetInboxId,
+        ),
+    )
+    .unwrap();
+    reg
+}
+
+/// `update_group_name` on a group with `proposals_enabled` should:
+/// - publish a commit containing an `AppDataUpdate(GROUP_NAME)` proposal,
+/// - apply the new name into the OpenMLS AppDataDictionary,
+/// - and surface it to peers through the capability-gated read accessor.
+#[xmtp_common::test(unwrap_try = true)]
+async fn test_update_group_name_via_app_data_update() {
+    use crate::groups::app_data::TEST_REGISTRY_OVERRIDE;
+
+    TEST_REGISTRY_OVERRIDE
+        .scope(build_permissive_test_registry(), async {
+            tester!(alix);
+            tester!(bo);
+
+            let alix_group = alix
+                .create_group_with_members(&[bo.inbox_id()], None, None)
+                .await
+                .unwrap();
+            let bo_groups = bo.sync_welcomes().await.unwrap();
+            let bo_group = bo_groups.first().unwrap();
+            bo_group.sync().await.unwrap();
+
+            // Flip proposals_enabled before the metadata write so the new path is taken.
+            alix_group.enable_proposals().await.unwrap();
+            bo_group.sync().await.unwrap();
+
+            // Sanity check the flag actually flipped from both sides.
+            let alix_flag = alix_group
+                .load_mls_group_with_lock_async(async |g| {
+                    Ok::<bool, crate::groups::GroupError>(alix_group.proposals_enabled(&g))
+                })
+                .await
+                .unwrap();
+            assert!(alix_flag, "alix proposals_enabled should be true");
+            let bo_flag = bo_group
+                .load_mls_group_with_lock_async(async |g| {
+                    Ok::<bool, crate::groups::GroupError>(bo_group.proposals_enabled(&g))
+                })
+                .await
+                .unwrap();
+            assert!(bo_flag, "bo proposals_enabled should be true");
+
+            alix_group
+                .update_group_name("AppData Group Name".to_string())
+                .await
+                .unwrap();
+
+            bo_group.sync().await.unwrap();
+            assert_eq!(
+                bo_group.group_name().unwrap(),
+                "AppData Group Name",
+                "Bo should see the new group name written through the AppData path"
+            );
+            assert_eq!(
+                alix_group.group_name().unwrap(),
+                "AppData Group Name",
+                "Alix should see her own update reflected through the read accessor"
+            );
+
+            // The capability-gated `mutable_metadata()` accessor should also surface
+            // the new value (it backs `group_name()`, but we exercise it directly to
+            // pin the merge-into-GMM path).
+            let bo_meta = bo_group.mutable_metadata().unwrap();
+            assert_eq!(
+                bo_meta.attributes.get("group_name").map(String::as_str),
+                Some("AppData Group Name")
+            );
+        })
+        .await;
+}
+
+/// `update_group_description` on a `proposals_enabled` group should also
+/// flow through the AppData path. This catches any per-field hardcoding
+/// (e.g. forgetting to map `Description` → `GROUP_DESCRIPTION`).
+#[xmtp_common::test(unwrap_try = true)]
+async fn test_update_group_description_via_app_data_update() {
+    use crate::groups::app_data::TEST_REGISTRY_OVERRIDE;
+
+    TEST_REGISTRY_OVERRIDE
+        .scope(build_permissive_test_registry(), async {
+            tester!(alix);
+            tester!(bo);
+
+            let alix_group = alix
+                .create_group_with_members(&[bo.inbox_id()], None, None)
+                .await
+                .unwrap();
+            let bo_groups = bo.sync_welcomes().await.unwrap();
+            let bo_group = bo_groups.first().unwrap();
+            bo_group.sync().await.unwrap();
+
+            alix_group.enable_proposals().await.unwrap();
+            bo_group.sync().await.unwrap();
+
+            alix_group
+                .update_group_description("AppData Description".to_string())
+                .await
+                .unwrap();
+
+            bo_group.sync().await.unwrap();
+            assert_eq!(
+                bo_group.group_description().unwrap(),
+                "AppData Description",
+                "Bo should see the new group description through the AppData path"
+            );
+        })
+        .await;
+}
+
+// NOTE: An ADMIN_LIST AppDataUpdate integration test was deliberately not
+// added in phase 1. The new collection-component path for ADMIN_LIST is
+// disabled (see the TODO in `IntentKind::UpdateAdminList`) until either
+// dual-write or full migration ships, because the legacy validator and the
+// new dict path otherwise diverge. Once that's in place, mirror the
+// `test_update_group_name_via_app_data_update` shape against
+// `update_admin_list(UpdateAdminListType::Add, …)`.
+
+/// Sanity check the legacy path: a group with `proposals_enabled = false`
+/// (the default for fresh groups) should still produce a normal GCE commit
+/// for `update_group_name`, with no AppDataUpdate involvement. Confirms
+/// that introducing the new branch hasn't accidentally affected unmigrated
+/// groups.
+#[xmtp_common::test(unwrap_try = true)]
+async fn test_update_group_name_uses_legacy_path_when_proposals_disabled() {
+    tester!(alix);
+    tester!(bo);
+
+    let alix_group = alix
+        .create_group_with_members(&[bo.inbox_id()], None, None)
+        .await?;
+    let bo_groups = bo.sync_welcomes().await?;
+    let bo_group = bo_groups.first()?;
+    bo_group.sync().await?;
+
+    // Sanity: proposals_enabled is false on a fresh group.
+    let flag = alix_group
+        .load_mls_group_with_lock_async(async |g| {
+            Ok::<bool, crate::groups::GroupError>(alix_group.proposals_enabled(&g))
+        })
+        .await?;
+    assert!(
+        !flag,
+        "Fresh groups should not have proposals_enabled set by default"
+    );
+
+    alix_group
+        .update_group_name("Legacy Path Name".to_string())
+        .await?;
+    bo_group.sync().await?;
+
+    assert_eq!(bo_group.group_name()?, "Legacy Path Name");
+    assert_eq!(alix_group.group_name()?, "Legacy Path Name");
+}
+
+/// Verify the **second gate**: with `proposals_enabled` flipped on but no
+/// test override populating the registry, `update_group_name` must still
+/// take the legacy GCE path. This is the production-safety invariant the
+/// `&& !load_component_registry(group).is_empty()` check protects, and
+/// it's the reason flipping `enable_proposals()` today doesn't break
+/// users' metadata updates before the migration PR ships.
+#[xmtp_common::test(unwrap_try = true)]
+async fn test_update_group_name_uses_legacy_path_when_registry_is_empty() {
+    tester!(alix);
+    tester!(bo);
+
+    // Deliberately do NOT install a permissive registry — this is the
+    // production-state simulation.
+    let alix_group = alix
+        .create_group_with_members(&[bo.inbox_id()], None, None)
+        .await?;
+    let bo_groups = bo.sync_welcomes().await?;
+    let bo_group = bo_groups.first()?;
+    bo_group.sync().await?;
+
+    // Flip proposals_enabled but leave the registry empty.
+    alix_group.enable_proposals().await?;
+    bo_group.sync().await?;
+
+    // The registry must in fact be empty — this test deliberately does
+    // NOT wrap its body in `TEST_REGISTRY_OVERRIDE.scope(...)`, and
+    // `task_local!` scopes only propagate within a single task, so
+    // there's no way another test could leak an override into this one.
+    // The assert is still here as defense-in-depth in case the mechanism
+    // ever changes.
+    let registry = alix_group
+        .load_mls_group_with_lock_async(async |g| {
+            Ok::<_, crate::groups::GroupError>(crate::groups::app_data::load_component_registry(&g))
+        })
+        .await?;
+    assert!(
+        registry.is_empty(),
+        "registry should be empty in this test (no TEST_REGISTRY_OVERRIDE scope) — got len {}",
+        registry.len()
+    );
+
+    // Update should succeed end-to-end via the legacy GCE path. If the
+    // gate were broken, the new path would activate, the receiver-side
+    // validator would deny the AppDataUpdate against the empty registry,
+    // and Alix's intent would land in the error state.
+    alix_group
+        .update_group_name("Gate-Closed Name".to_string())
+        .await?;
+    bo_group.sync().await?;
+
+    assert_eq!(
+        bo_group.group_name()?,
+        "Gate-Closed Name",
+        "Bo should see the new name through the legacy GCE path even though proposals_enabled is on"
+    );
+    assert_eq!(
+        alix_group.group_name()?,
+        "Gate-Closed Name",
+        "Alix should see her own update through the legacy path"
+    );
+}
+
+/// Verify the receiver-side validator denies an inline AppDataUpdate
+/// proposal when the actor doesn't have permission for the targeted
+/// component. Installs a *deny*-policy registry so the per-element check
+/// rejects the update, then asserts the resulting commit is rejected
+/// with `InsufficientPermissions`.
+///
+/// This pins the invariant that
+/// [`validate_inline_app_data_update_proposals`] actually fires for
+/// inline proposals — without it, the new path would silently bypass
+/// permission checks because `extract_metadata_changes` only inspects
+/// the legacy GMM extension.
+#[xmtp_common::test(unwrap_try = true)]
+async fn test_inline_app_data_update_denied_by_registry_policy() {
+    use crate::groups::app_data::TEST_REGISTRY_OVERRIDE;
+    use xmtp_mls_common::app_data::{
+        component_id::ComponentId,
+        component_permissions::component_permissions,
+        component_registry::{ComponentRegistry, new_component_metadata},
+    };
+    use xmtp_proto::xmtp::mls::message_contents::{
+        ComponentType, MetadataPolicy as MetadataPolicyProto,
+        metadata_policy::{Kind as MetadataPolicyKind, MetadataBasePolicy},
+    };
+
+    fn deny() -> MetadataPolicyProto {
+        MetadataPolicyProto {
+            kind: Some(MetadataPolicyKind::Base(MetadataBasePolicy::Deny as i32)),
+        }
+    }
+
+    // Build a registry that denies all GROUP_NAME writes. The local
+    // intent processor will publish the AppDataUpdate-bearing commit and
+    // then immediately re-process it through `from_staged_commit`, which
+    // calls `validate_inline_app_data_update_proposals` and denies.
+    let mut reg = ComponentRegistry::new();
+    reg.set(
+        ComponentId::GROUP_NAME,
+        new_component_metadata(
+            component_permissions()
+                .insert(deny())
+                .update(deny())
+                .delete(deny())
+                .call(),
+            ComponentType::Bytes,
+        ),
+    )?;
+
+    TEST_REGISTRY_OVERRIDE
+        .scope(reg, async {
+            tester!(alix);
+            tester!(bo);
+
+            let alix_group = alix
+                .create_group_with_members(&[bo.inbox_id()], None, None)
+                .await
+                .unwrap();
+            let bo_groups = bo.sync_welcomes().await.unwrap();
+            let bo_group = bo_groups.first().unwrap();
+            bo_group.sync().await.unwrap();
+
+            alix_group.enable_proposals().await.unwrap();
+            bo_group.sync().await.unwrap();
+
+            // Capture the pre-update group name so we can assert it didn't change.
+            let original = alix_group.group_name().unwrap();
+
+            // Attempt the update. The validator should reject the AppDataUpdate
+            // proposal because GROUP_NAME's update_policy is `Deny`.
+            let result = alix_group
+                .update_group_name("Should Be Rejected".to_string())
+                .await;
+            assert!(
+                result.is_err(),
+                "update_group_name should fail when GROUP_NAME has a Deny policy in the registry, got Ok"
+            );
+
+            // The group name in the legacy GMM is unchanged because the rejected
+            // commit never made it past validation.
+            assert_eq!(
+                alix_group.group_name().unwrap(),
+                original,
+                "group name should be unchanged after the rejected update"
+            );
+        })
+        .await;
+}

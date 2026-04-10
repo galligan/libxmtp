@@ -157,6 +157,18 @@ pub enum GroupMessageProcessingError {
     OpenMlsProcessMessage(
         #[from] openmls::prelude::ProcessMessageError<sql_key_store::SqlKeyStoreError>,
     ),
+    /// AppDataUpdate-aware processing wrapper error.
+    ///
+    /// Wraps the same `ProcessMessageError` as the variant above, plus the
+    /// `ComponentSourceError` that fires when an incoming `AppDataUpdate`
+    /// payload can't be decoded under our wire format. Kept distinct from
+    /// `OpenMlsProcessMessage` so the AppData-decode failure mode is
+    /// greppable in logs.
+    #[error("app-data process message error: {0}")]
+    OpenMlsProcessMessageWithAppData(
+        #[from]
+        super::app_data::ProcessMessageWithAppDataError<sql_key_store::SqlKeyStoreError>,
+    ),
     #[error("merge staged commit: {0}")]
     MergeStagedCommit(#[from] openmls::group::MergeCommitError<sql_key_store::SqlKeyStoreError>),
     #[error("TLS Codec error: {0}")]
@@ -214,6 +226,12 @@ impl RetryableError for GroupMessageProcessingError {
             Self::Diesel(err) => err.is_retryable(),
             Self::Identity(err) => err.is_retryable(),
             Self::OpenMlsProcessMessage(err) => err.is_retryable(),
+            Self::OpenMlsProcessMessageWithAppData(err) => match err {
+                super::app_data::ProcessMessageWithAppDataError::OpenMls(e) => e.is_retryable(),
+                // Decode failures are wire-format violations from the
+                // peer — retrying won't help.
+                super::app_data::ProcessMessageWithAppDataError::AppDataDecode(_) => false,
+            },
             Self::MergeStagedCommit(err) => err.is_retryable(),
             Self::ProcessIntent(err) => err.is_retryable(),
             Self::CommitValidation(err) => err.is_retryable(),
@@ -249,10 +267,28 @@ impl RetryableError for GroupMessageProcessingError {
 
 impl GroupMessageProcessingError {
     pub(crate) fn commit_result(&self) -> CommitResult {
+        use super::app_data::ProcessMessageWithAppDataError;
         match self {
             GroupMessageProcessingError::OpenMlsProcessMessage(
                 ProcessMessageError::ValidationError(ValidationError::WrongEpoch),
             ) => CommitResult::WrongEpoch,
+            // Treat the AppData-aware wrapper the same as the bare
+            // OpenMLS error: if it carries a ValidationError(WrongEpoch),
+            // surface as WrongEpoch; if it carries any other OpenMLS
+            // error, surface as Undecryptable. Decode failures (the
+            // AppData-side variant) are treated as Invalid because they
+            // mean the peer's wire format was wrong.
+            GroupMessageProcessingError::OpenMlsProcessMessageWithAppData(
+                ProcessMessageWithAppDataError::OpenMls(ProcessMessageError::ValidationError(
+                    ValidationError::WrongEpoch,
+                )),
+            ) => CommitResult::WrongEpoch,
+            GroupMessageProcessingError::OpenMlsProcessMessageWithAppData(
+                ProcessMessageWithAppDataError::OpenMls(_),
+            ) => CommitResult::Undecryptable,
+            GroupMessageProcessingError::OpenMlsProcessMessageWithAppData(
+                ProcessMessageWithAppDataError::AppDataDecode(_),
+            ) => CommitResult::Invalid,
             GroupMessageProcessingError::OldEpoch(_, _) => CommitResult::WrongEpoch,
             GroupMessageProcessingError::FutureEpoch(_, _) => CommitResult::WrongEpoch,
             GroupMessageProcessingError::CommitValidation(_) => CommitResult::Invalid,
@@ -1010,7 +1046,11 @@ where
         let result = provider.key_store().transaction(|conn| {
             let storage = conn.key_store();
             let provider = XmtpOpenMlsProvider::new(storage);
-            processed_message = Some(mls_group.process_message(&provider, message.clone()));
+            processed_message = Some(super::app_data::process_message_with_app_data(
+                mls_group,
+                &provider,
+                message.clone(),
+            ));
             // Rollback the transaction. We want to synchronize with the server before committing.
             Err::<(), StorageError>(StorageError::IntentionalRollback)
         });
@@ -1174,7 +1214,11 @@ where
                 return identifier.build();
             }
             // once the checks for processing pass, actually process the message
-            let processed_message = mls_group.process_message(&provider, message.clone())?;
+            let processed_message = super::app_data::process_message_with_app_data(
+                mls_group,
+                &provider,
+                message.clone(),
+            )?;
             let identifier = self.process_external_message(
                 mls_group,
                 processed_message,
@@ -2668,6 +2712,64 @@ where
             }
             IntentKind::MetadataUpdate => {
                 let metadata_intent = UpdateMetadataIntentData::try_from(intent.data.clone())?;
+
+                // Gate the AppDataUpdate path on both the capability flag
+                // AND a non-empty component registry. The registry check
+                // keeps unmigrated groups on the legacy path so a sender
+                // doesn't publish commits that the receiver would deny
+                // (`NoRegistryEntry`) against an empty registry.
+                if self.proposals_enabled(openmls_group)
+                    && !super::app_data::load_component_registry(openmls_group).is_empty()
+                {
+                    // Bundle the AppDataUpdate proposal and its resulting
+                    // dict update into a single commit so propose-and-apply
+                    // stays atomic — matching the legacy GCE path's
+                    // "metadata update completes in one sync" semantics.
+                    use super::app_data::{
+                        component_source::{
+                            ComponentMutation, ComponentSourceError,
+                            encode_app_data_update_payload, metadata_field_to_component_id,
+                        },
+                        stage_inline_app_data_commit,
+                    };
+
+                    let component_id = metadata_field_to_component_id(&metadata_intent.field_name)
+                        .ok_or_else(|| {
+                            GroupError::ComponentSource(ComponentSourceError::UnknownMetadataField(
+                                metadata_intent.field_name.clone(),
+                            ))
+                        })?;
+
+                    let payload = encode_app_data_update_payload(&ComponentMutation::Bytes {
+                        component_id,
+                        new_value: metadata_intent.field_value.as_bytes(),
+                    })?;
+
+                    let signer = self.context.identity().installation_keys.clone();
+                    let (bundle, staged_commit, group_epoch) = generate_commit_with_rollback(
+                        storage,
+                        openmls_group,
+                        move |group, provider| -> Result<_, GroupError> {
+                            Ok(stage_inline_app_data_commit(
+                                group,
+                                provider,
+                                &signer,
+                                component_id,
+                                payload,
+                            )?)
+                        },
+                    )?;
+
+                    let (commit, _, _) = bundle.into_messages();
+                    return Ok(Some(PublishIntentData {
+                        payloads_to_publish: vec![commit.tls_serialize_detached()?],
+                        staged_commit,
+                        post_commit_action: None,
+                        should_send_push_notification: intent.should_push,
+                        group_epoch,
+                    }));
+                }
+
                 let mutable_metadata_extensions = build_extensions_for_metadata_update(
                     openmls_group,
                     metadata_intent.field_name,
@@ -2695,6 +2797,10 @@ where
                 }))
             }
             IntentKind::UpdateAdminList => {
+                // ADMIN_LIST stays on the legacy GCE path: routing it
+                // through AppDataUpdate would let the GMM-backed validators
+                // in `validated_commit.rs` diverge from the dict until the
+                // migration is dual-write or complete.
                 let admin_list_update_intent =
                     UpdateAdminListIntentData::try_from(intent.data.clone())?;
                 let mutable_metadata_extensions = build_extensions_for_admin_lists_update(
@@ -3086,12 +3192,22 @@ where
                                     .map_err(GroupError::Proposal)?;
                                 let gce_payload = gce_msg.tls_serialize_detached()?;
 
+                                // If there are AppDataUpdate proposals pending,
+                                // pre-compute the AppDataUpdates so the commit
+                                // builder can apply them. See plan §11.
+                                let app_data_updates =
+                                    super::app_data::pending_app_data_updates(group)?;
+
                                 // Create commit consuming all proposals (including GCE)
-                                let bundle = group
+                                let mut stage = group
                                     .commit_builder()
                                     .consume_proposal_store(true)
                                     .load_psks(provider.storage())
-                                    .map_err(CommitToPendingProposalsError::from)?
+                                    .map_err(CommitToPendingProposalsError::from)?;
+                                if app_data_updates.is_some() {
+                                    stage.with_app_data_dictionary_updates(app_data_updates);
+                                }
+                                let bundle = stage
                                     .build(provider.rand(), provider.crypto(), &signer, |qp| {
                                         match qp.proposal() {
                                             Proposal::GroupContextExtensions(gce) => {
@@ -3152,16 +3268,22 @@ where
                     let (bundle, staged_commit, group_epoch) = generate_commit_with_rollback(
                         storage,
                         openmls_group,
-                        |group,
-                         provider|
-                         -> Result<
-                            _,
-                            CommitToPendingProposalsError<sql_key_store::SqlKeyStoreError>,
-                        > {
-                            Ok(group
+                        |group, provider| -> Result<_, GroupError> {
+                            // If there are AppDataUpdate proposals pending,
+                            // pre-compute the AppDataUpdates so the commit
+                            // builder can apply them. See plan §11.
+                            let app_data_updates =
+                                super::app_data::pending_app_data_updates(group)?;
+
+                            let mut stage = group
                                 .commit_builder()
                                 .consume_proposal_store(true)
-                                .load_psks(provider.storage())?
+                                .load_psks(provider.storage())
+                                .map_err(CommitToPendingProposalsError::from)?;
+                            if app_data_updates.is_some() {
+                                stage.with_app_data_dictionary_updates(app_data_updates);
+                            }
+                            let bundle = stage
                                 .build(provider.rand(), provider.crypto(), signer, |qp| {
                                     match qp.proposal() {
                                         Proposal::GroupContextExtensions(gce) => {
@@ -3179,8 +3301,11 @@ where
                                         }
                                         _ => true,
                                     }
-                                })?
-                                .stage_commit(provider)?)
+                                })
+                                .map_err(CommitToPendingProposalsError::from)?
+                                .stage_commit(provider)
+                                .map_err(CommitToPendingProposalsError::from)?;
+                            Ok(bundle)
                         },
                     )?;
                     let (commit, maybe_welcome, _group_info) = bundle.into_messages();
