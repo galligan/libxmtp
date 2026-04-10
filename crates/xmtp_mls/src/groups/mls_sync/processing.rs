@@ -204,6 +204,108 @@ where
         Ok(())
     }
 
+    fn process_external_message_transaction<Provider>(
+        &self,
+        provider: &Provider,
+        mls_group: &mut OpenMlsGroup,
+        envelope: &GroupMessage,
+        allow_cursor_increment: bool,
+        validated_commit: Option<ValidatedCommit>,
+        identifier: &mut MessageIdentifierBuilder,
+        deferred_events: &mut DeferredEvents,
+    ) -> Result<MessageIdentifier, GroupMessageProcessingError>
+    where
+        Provider: MlsProviderExt,
+    {
+        let storage = provider.key_store();
+        let db = storage.db();
+        let GroupMessage {
+            cursor, message, ..
+        } = envelope;
+
+        tracing::debug!(
+            inbox_id = self.context.inbox_id(),
+            installation_id = %self.context.installation_id(),
+            group_id = hex::encode(&self.group_id),
+            current_epoch = mls_group.epoch().as_u64(),
+            cursor = ?cursor,
+            "[{}] processing message in transaction epoch = {}, cursor = {:?}",
+            self.context.inbox_id(),
+            mls_group.epoch().as_u64(),
+            cursor
+        );
+
+        // TXN-EDGE: cursor advancement + MLS message apply + transcript/event persistence - unresolved
+        let requires_processing = if allow_cursor_increment {
+            self.maybe_update_cursor(&db, envelope)?
+        } else {
+            tracing::info!(
+                "will not call update cursor for group {}, with cursor {}, allow_cursor_increment is false",
+                hex::encode(envelope.group_id.as_slice()),
+                *cursor
+            );
+            let current_cursor = db.get_last_cursor_for_originator(
+                &envelope.group_id,
+                envelope.entity_kind(),
+                envelope.originator_id(),
+            )?;
+            current_cursor.sequence_id < envelope.cursor.sequence_id
+        };
+        if !requires_processing {
+            // early return if the message is already processed
+            // _NOTE_: Not early returning and re-processing a message that
+            // has already been processed, has the potential to result in forks.
+            tracing::debug!(
+                "message @cursor=[{}] for group=[{}] created_at=[{}] no longer require processing, should be available in database",
+                envelope.cursor,
+                xmtp_common::fmt::debug_hex(&envelope.group_id),
+                envelope.created_ns
+            );
+            identifier.previously_processed(true);
+            return identifier.build();
+        }
+        // once the checks for processing pass, actually process the message
+        let processed_message = mls_group.process_message(provider, message.clone())?;
+        self.process_external_message(
+            mls_group,
+            processed_message,
+            envelope,
+            validated_commit,
+            storage,
+            deferred_events,
+        )
+    }
+
+    fn preflight_external_message_processing<Provider>(
+        &self,
+        provider: &Provider,
+        mls_group: &mut OpenMlsGroup,
+        message: &ProtocolMessage,
+    ) -> Result<ProcessedMessage, GroupMessageProcessingError>
+    where
+        Provider: MlsProviderExt,
+    {
+        let mut processed_message = None;
+
+        // TXN-EDGE: external message preflight + forced MLS reload - unresolved (intentional rollback before durable apply)
+        let result = provider.key_store().transaction(|conn| {
+            let storage = conn.key_store();
+            let provider = XmtpOpenMlsProvider::new(storage);
+            processed_message = Some(mls_group.process_message(&provider, message.clone()));
+            // Rollback the transaction. We want to synchronize with the server before committing.
+            Err::<(), StorageError>(StorageError::IntentionalRollback)
+        });
+        if !matches!(result, Err(StorageError::IntentionalRollback)) {
+            result.inspect_err(|e| tracing::debug!("immutable process message failed {}", e))?;
+        }
+        let processed_message = processed_message.expect("Was just set to Some")?;
+
+        // Reload the mlsgroup to clear the it's internal cache
+        mls_group.reload(provider.key_store())?;
+
+        Ok(processed_message)
+    }
+
     /// This function is idempotent. No need to wrap in a transaction.
     ///
     /// # Parameters
@@ -767,22 +869,8 @@ where
         // We'll process for the first time, get the processed message,
         // and roll the transaction back, so we can fetch updates from the server before
         // being ready to process the message for a second time.
-        let mut processed_message = None;
-        // TXN-EDGE: external message preflight + forced MLS reload - unresolved (intentional rollback before durable apply)
-        let result = provider.key_store().transaction(|conn| {
-            let storage = conn.key_store();
-            let provider = XmtpOpenMlsProvider::new(storage);
-            processed_message = Some(mls_group.process_message(&provider, message.clone()));
-            // Rollback the transaction. We want to synchronize with the server before committing.
-            Err::<(), StorageError>(StorageError::IntentionalRollback)
-        });
-        if !matches!(result, Err(StorageError::IntentionalRollback)) {
-            result.inspect_err(|e| tracing::debug!("immutable process message failed {}", e))?;
-        }
-        let processed_message = processed_message.expect("Was just set to Some")?;
-
-        // Reload the mlsgroup to clear the it's internal cache
-        mls_group.reload(provider.storage())?;
+        let processed_message =
+            self.preflight_external_message_processing(&provider, mls_group, message)?;
 
         let (sender_inbox_id, sender_installation_id) =
             extract_message_sender(mls_group, &processed_message, envelope_timestamp_ns as u64)?;
@@ -860,62 +948,18 @@ where
         };
 
         let mut deferred_events = DeferredEvents::new();
-        // TXN-EDGE: cursor advancement + MLS message apply + transcript/event persistence - unresolved
         let identifier = provider.key_store().transaction(|conn| {
-            let storage = conn.key_store();
-            let db = storage.db();
-            let provider = XmtpOpenMlsProviderRef::new(&storage);
-            tracing::debug!(
-                inbox_id = self.context.inbox_id(),
-                installation_id = %self.context.installation_id(),
-                group_id = hex::encode(&self.group_id),
-                current_epoch = mls_group.epoch().as_u64(),
-                msg_epoch = processed_message.epoch().as_u64(),
-                cursor = ?cursor,
-                "[{}] processing message in transaction epoch = {}, cursor = {:?}",
-                self.context.inbox_id(),
-                mls_group.epoch().as_u64(),
-                cursor
-            );
-            let requires_processing = if allow_cursor_increment {
-                self.maybe_update_cursor(&db, envelope)?
-            } else {
-                tracing::info!(
-                    "will not call update cursor for group {}, with cursor {}, allow_cursor_increment is false",
-                    hex::encode(envelope.group_id.as_slice()),
-                    *cursor
-                );
-                let current_cursor = db.get_last_cursor_for_originator(
-                    &envelope.group_id,
-                    envelope.entity_kind(),
-                    envelope.originator_id(),
-                )?;
-                current_cursor.sequence_id < envelope.cursor.sequence_id
-            };
-            if !requires_processing {
-                // early return if the message is already processed
-                // _NOTE_: Not early returning and re-processing a message that
-                // has already been processed, has the potential to result in forks.
-                tracing::debug!(
-                    "message @cursor=[{}] for group=[{}] created_at=[{}] no longer require processing, should be available in database",
-                    envelope.cursor,
-                    xmtp_common::fmt::debug_hex(&envelope.group_id),
-                    envelope.created_ns
-                );
-                identifier.previously_processed(true);
-                return identifier.build();
-            }
-            // once the checks for processing pass, actually process the message
-            let processed_message = mls_group.process_message(&provider, message.clone())?;
-            let identifier = self.process_external_message(
+            let key_store = conn.key_store();
+            let provider = XmtpOpenMlsProviderRef::new(&key_store);
+            self.process_external_message_transaction(
+                &provider,
                 mls_group,
-                processed_message,
                 envelope,
+                allow_cursor_increment,
                 validated_commit.clone(),
-                &storage,
+                &mut identifier,
                 &mut deferred_events,
-            )?;
-            Ok::<_, GroupMessageProcessingError>(identifier)
+            )
         })?;
 
         // Send all deferred events after the transaction completes
