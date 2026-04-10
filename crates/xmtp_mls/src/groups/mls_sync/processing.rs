@@ -3,6 +3,17 @@ use crate::groups::validated_commit::CommitValidationContext;
 use crate::identity_updates::IdentityStateContext;
 use xmtp_proto::types::{Cursor, InstallationId};
 
+async fn validate_staged_commit<Context>(
+    context: &Context,
+    staged_commit: &StagedCommit,
+    mls_group: &OpenMlsGroup,
+) -> Result<ValidatedCommit, CommitValidationError>
+where
+    Context: CommitValidationContext + Clone,
+{
+    ValidatedCommit::from_staged_commit(context.clone(), staged_commit, mls_group).await
+}
+
 async fn validate_staged_commit_for_intent<Context>(
     context: &Context,
     local_inbox_id: InboxIdRef<'_>,
@@ -24,8 +35,7 @@ where
         envelope_timestamp_ns,
     );
 
-    let maybe_validated_commit =
-        ValidatedCommit::from_staged_commit(context.clone(), staged_commit, mls_group).await;
+    let maybe_validated_commit = validate_staged_commit(context, staged_commit, mls_group).await;
 
     match maybe_validated_commit {
         Err(err) => {
@@ -743,9 +753,7 @@ where
 
         let validated_commit = match &processed_message.content() {
             ProcessedMessageContent::StagedCommitMessage(staged_commit) => {
-                let result =
-                    ValidatedCommit::from_staged_commit(&self.context, staged_commit, mls_group)
-                        .await;
+                let result = validate_staged_commit(&self.context, staged_commit, mls_group).await;
 
                 let validated_commit = match result {
                     Err(e) if !e.is_retryable() => {
