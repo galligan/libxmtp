@@ -54,6 +54,7 @@ where
     let mut staged_commit = None;
     let mut group_epoch = None;
 
+    // TXN-EDGE: staged MLS commit snapshot + pre-commit epoch capture - intentional rollback snapshot, not durable state
     let transaction_result = storage.transaction(|conn| {
         let key_store = conn.key_store();
         let provider = XmtpOpenMlsProviderRef::new(&key_store);
