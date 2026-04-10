@@ -1,4 +1,52 @@
 use super::*;
+use crate::groups::validated_commit::CommitValidationContext;
+use crate::identity_updates::IdentityStateContext;
+use xmtp_proto::types::{Cursor, InstallationId};
+
+async fn validate_staged_commit_for_intent<Context>(
+    context: &Context,
+    local_inbox_id: InboxIdRef<'_>,
+    local_installation_id: InstallationId,
+    group_id: &[u8],
+    cursor: &Cursor,
+    intent: &StoredGroupIntent,
+    staged_commit: &StagedCommit,
+    mls_group: &OpenMlsGroup,
+    envelope_timestamp_ns: i64,
+) -> Result<ValidatedCommit, IntentResolutionError>
+where
+    Context: CommitValidationContext + Clone,
+{
+    tracing::info!(
+        "[{}] Validating commit for intent {}. Message timestamp: ({})",
+        local_inbox_id,
+        intent.id,
+        envelope_timestamp_ns,
+    );
+
+    let maybe_validated_commit =
+        ValidatedCommit::from_staged_commit(context.clone(), staged_commit, mls_group).await;
+
+    match maybe_validated_commit {
+        Err(err) => {
+            tracing::error!(
+                inbox_id = local_inbox_id,
+                installation_id = %local_installation_id,
+                group_id = hex::encode(group_id),
+                cursor = %cursor,
+                intent.id,
+                intent.kind = %intent.kind,
+                "Error validating commit for own message. Intent ID [{}]: {err:?}",
+                intent.id,
+            );
+            Err(IntentResolutionError {
+                processing_error: GroupMessageProcessingError::CommitValidation(err),
+                next_intent_state: IntentState::Error,
+            })
+        }
+        Ok(validated_commit) => Ok(validated_commit),
+    }
+}
 
 impl<Context> MlsGroup<Context>
 where
@@ -133,8 +181,9 @@ where
                     intent.kind
                 );
 
-                let validation_result =
-                    self.stage_and_validate_intent(mls_group, &intent, envelope).await;
+                let validation_result = self
+                    .stage_and_validate_intent(mls_group, &intent, envelope)
+                    .await;
 
                 // TXN-EDGE: cursor advancement + intent state transition + MLS apply/store writes - unresolved
                 self.context.mls_storage().transaction(|conn| {
@@ -413,42 +462,19 @@ where
                             }
                         })?;
 
-                    tracing::info!(
-                        "[{}] Validating commit for intent {}. Message timestamp: ({})/{}",
-                        self.context.inbox_id(),
-                        intent.id,
-                        envelope.timestamp(),
-                        envelope.created_ns
-                    );
-
-                    let maybe_validated_commit = ValidatedCommit::from_staged_commit(
+                    let validated_commit = validate_staged_commit_for_intent(
                         &self.context,
+                        self.context.inbox_id(),
+                        IdentityStateContext::installation_id(&self.context),
+                        &self.group_id,
+                        cursor,
+                        intent,
                         &staged_commit,
                         mls_group,
+                        envelope.timestamp(),
                     )
                     .await;
-
-                    let validated_commit = match maybe_validated_commit {
-                        Err(err) => {
-                            tracing::error!(
-                                inbox_id = self.context.inbox_id(),
-                                installation_id = %self.context.installation_id(),
-                                group_id = hex::encode(&self.group_id),
-                                cursor = %cursor,
-                                intent.id,
-                                intent.kind = %intent.kind,
-                                "Error validating commit for own message. Intent ID [{}]: {err:?}",
-                                intent.id,
-                            );
-                            return Err(IntentResolutionError {
-                                processing_error: GroupMessageProcessingError::CommitValidation(
-                                    err,
-                                ),
-                                next_intent_state: IntentState::Error,
-                            });
-                        }
-                        Ok(validated_commit) => validated_commit,
-                    };
+                    let validated_commit = validated_commit?;
 
                     return Ok(Some((staged_commit, validated_commit)));
                 }
