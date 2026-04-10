@@ -4,6 +4,7 @@ use crate::groups::InitialMembershipValidator;
 use crate::groups::ValidateGroupMembership;
 use crate::groups::XmtpWelcome;
 use crate::groups::{GroupError, MlsGroup};
+use crate::identity_updates::IdentityStateContext;
 use crate::intents::ProcessIntentError;
 use crate::mls_store::MlsStore;
 use futures::stream::{self, FuturesUnordered, StreamExt};
@@ -202,29 +203,6 @@ where
         ))
     }
 
-    async fn filter_groups_needing_sync(
-        &self,
-        groups: Vec<MlsGroup<Context>>,
-    ) -> Result<Vec<MlsGroup<Context>>, GroupError> {
-        let db = self.context.db();
-        let api = self.context.api();
-
-        let group_ids: Vec<&[u8]> = groups.iter().map(|group| group.group_id.as_ref()).collect();
-        let last_synced_cursors = db.get_last_cursor_for_ids(
-            &group_ids,
-            &[EntityKind::ApplicationMessage, EntityKind::CommitMessage],
-        )?;
-        let latest_message_metadata = api.get_newest_message_metadata(group_ids).await?;
-
-        let group_ids_needing_sync =
-            filter_groups_with_new_messages(last_synced_cursors, latest_message_metadata);
-
-        Ok(groups
-            .into_iter()
-            .filter(|group| group_ids_needing_sync.contains(&group.group_id))
-            .collect::<Vec<_>>())
-    }
-
     pub async fn sync_all_welcomes_and_history_sync_groups(
         &self,
     ) -> Result<GroupSyncSummary, ClientError> {
@@ -341,6 +319,34 @@ where
             .await;
 
         Ok(active_group_count.load(Ordering::SeqCst))
+    }
+}
+
+impl<Context> WelcomeService<Context>
+where
+    Context: IdentityStateContext,
+{
+    async fn filter_groups_needing_sync(
+        &self,
+        groups: Vec<MlsGroup<Context>>,
+    ) -> Result<Vec<MlsGroup<Context>>, GroupError> {
+        let db = self.context.db();
+        let api = self.context.api();
+
+        let group_ids: Vec<&[u8]> = groups.iter().map(|group| group.group_id.as_ref()).collect();
+        let last_synced_cursors = db.get_last_cursor_for_ids(
+            &group_ids,
+            &[EntityKind::ApplicationMessage, EntityKind::CommitMessage],
+        )?;
+        let latest_message_metadata = api.get_newest_message_metadata(group_ids).await?;
+
+        let group_ids_needing_sync =
+            filter_groups_with_new_messages(last_synced_cursors, latest_message_metadata);
+
+        Ok(groups
+            .into_iter()
+            .filter(|group| group_ids_needing_sync.contains(&group.group_id))
+            .collect::<Vec<_>>())
     }
 }
 
