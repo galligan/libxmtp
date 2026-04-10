@@ -1,44 +1,75 @@
 use super::*;
+use xmtp_common::{MaybeSend, MaybeSync};
+
+pub(super) trait PauseResolutionContext: MaybeSend + MaybeSync {
+    fn paused_group_version(&self, group_id: &[u8]) -> Result<Option<String>, GroupError>;
+    fn unpause_group(&self, group_id: &[u8]) -> Result<(), GroupError>;
+    fn current_pkg_version(&self) -> &str;
+}
+
+impl<Context> PauseResolutionContext for Context
+where
+    Context: XmtpSharedContext,
+{
+    fn paused_group_version(&self, group_id: &[u8]) -> Result<Option<String>, GroupError> {
+        Ok(self.db().get_group_paused_version(group_id)?)
+    }
+
+    fn unpause_group(&self, group_id: &[u8]) -> Result<(), GroupError> {
+        Ok(self.db().unpause_group(group_id)?)
+    }
+
+    fn current_pkg_version(&self) -> &str {
+        self.version_info().pkg_version()
+    }
+}
+
+pub(super) fn resolve_paused_group<Context>(
+    context: &Context,
+    group_id: &[u8],
+) -> Result<(), GroupError>
+where
+    Context: PauseResolutionContext,
+{
+    if let Some(required_min_version_str) = context.paused_group_version(group_id)? {
+        tracing::info!(
+            "Group is paused until version: {}",
+            required_min_version_str
+        );
+        let current_version_str = context.current_pkg_version();
+        let current_version = LibXMTPVersion::parse(current_version_str)?;
+        let required_min_version = LibXMTPVersion::parse(&required_min_version_str)?;
+
+        if required_min_version <= current_version {
+            tracing::info!(
+                "Unpausing group since version requirements are met. \
+                 Group ID: {}",
+                hex::encode(group_id),
+            );
+            context.unpause_group(group_id)?;
+        } else {
+            tracing::warn!(
+                "Skipping sync for paused group since version requirements are not met. \
+                Group ID: {}, \
+                Required version: {}, \
+                Current version: {}",
+                hex::encode(group_id),
+                required_min_version_str,
+                current_version_str
+            );
+            return Err(GroupError::GroupPausedUntilUpdate(required_min_version_str));
+        }
+    }
+
+    Ok(())
+}
 
 impl<Context> MlsGroup<Context>
 where
     Context: XmtpSharedContext,
 {
     pub(super) fn handle_group_paused(&self) -> Result<(), GroupError> {
-        // Check if group is paused and try to unpause if version requirements are met
-        if let Some(required_min_version_str) =
-            self.context.db().get_group_paused_version(&self.group_id)?
-        {
-            tracing::info!(
-                "Group is paused until version: {}",
-                required_min_version_str
-            );
-            let current_version_str = self.context.version_info().pkg_version();
-            let current_version = LibXMTPVersion::parse(current_version_str)?;
-            let required_min_version = LibXMTPVersion::parse(&required_min_version_str)?;
-
-            if required_min_version <= current_version {
-                tracing::info!(
-                    "Unpausing group since version requirements are met. \
-                     Group ID: {}",
-                    hex::encode(&self.group_id),
-                );
-                self.context.db().unpause_group(&self.group_id)?;
-            } else {
-                tracing::warn!(
-                    "Skipping sync for paused group since version requirements are not met. \
-                    Group ID: {}, \
-                    Required version: {}, \
-                    Current version: {}",
-                    hex::encode(&self.group_id),
-                    required_min_version_str,
-                    current_version_str
-                );
-                // Skip sync for paused groups
-                return Err(GroupError::GroupPausedUntilUpdate(required_min_version_str));
-            }
-        }
-        Ok(())
+        resolve_paused_group(&self.context, &self.group_id)
     }
 
     #[cfg_attr(any(test, feature = "test-utils"), tracing::instrument(level = "info", fields(who = %self.context.inbox_id()), skip_all))]
