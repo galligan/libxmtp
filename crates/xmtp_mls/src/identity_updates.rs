@@ -3,12 +3,16 @@ use crate::{
     client::ClientError,
     context::XmtpSharedContext,
     groups::group_membership::{GroupMembership, MembershipDiff},
-    identity::{IdentityError, IdentityExt},
+    identity::{Identity, IdentityError, IdentityExt},
     subscriptions::SyncWorkerEvent,
 };
 use futures::{StreamExt, future::try_join_all, stream::FuturesUnordered};
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 use thiserror::Error;
+use tokio::sync::broadcast;
 use xmtp_common::{Event, Retry, RetryableError, retry_async, retryable};
 use xmtp_configuration::Originators;
 use xmtp_cryptography::CredentialSign;
@@ -33,6 +37,7 @@ use xmtp_macro::log_event;
 use xmtp_proto::{
     ShortHex,
     api_client::{XmtpIdentityClient, XmtpMlsClient},
+    types::InstallationId,
 };
 
 use xmtp_api::{ApiClientWrapper, GetIdentityUpdatesV2Filter};
@@ -77,6 +82,54 @@ pub struct IdentityUpdates<Context> {
 impl<Context> IdentityUpdates<Context> {
     pub fn new(context: Context) -> Self {
         Self { context }
+    }
+}
+
+#[doc(hidden)]
+pub trait IdentityUpdateContext {
+    type Db: XmtpDb;
+    type ApiClient: XmtpApi;
+
+    fn db(&self) -> <Self::Db as XmtpDb>::DbQuery;
+    fn api(&self) -> &ApiClientWrapper<Self::ApiClient>;
+    fn scw_verifier(&self) -> Arc<Box<dyn SmartContractSignatureVerifier>>;
+    fn identity(&self) -> &Identity;
+    fn worker_events(&self) -> &broadcast::Sender<SyncWorkerEvent>;
+
+    fn inbox_id(&self) -> InboxIdRef<'_> {
+        self.identity().inbox_id()
+    }
+
+    fn installation_id(&self) -> InstallationId {
+        self.identity().installation_id()
+    }
+}
+
+impl<Context> IdentityUpdateContext for Context
+where
+    Context: XmtpSharedContext,
+{
+    type Db = Context::Db;
+    type ApiClient = Context::ApiClient;
+
+    fn db(&self) -> <Self::Db as XmtpDb>::DbQuery {
+        XmtpSharedContext::db(self)
+    }
+
+    fn api(&self) -> &ApiClientWrapper<Self::ApiClient> {
+        XmtpSharedContext::api(self)
+    }
+
+    fn scw_verifier(&self) -> Arc<Box<dyn SmartContractSignatureVerifier>> {
+        XmtpSharedContext::scw_verifier(self)
+    }
+
+    fn identity(&self) -> &Identity {
+        XmtpSharedContext::identity(self)
+    }
+
+    fn worker_events(&self) -> &broadcast::Sender<SyncWorkerEvent> {
+        XmtpSharedContext::worker_events(self)
     }
 }
 
@@ -191,7 +244,7 @@ pub async fn batch_get_association_state_with_verifier(
 
 impl<'a, Context> IdentityUpdates<Context>
 where
-    Context: XmtpSharedContext,
+    Context: IdentityUpdateContext,
 {
     /// Get the association state for all provided `inbox_id`/optional `sequence_id` tuples, using the cache when available
     /// If the association state is not available in the cache, this falls back to reconstructing the association state
