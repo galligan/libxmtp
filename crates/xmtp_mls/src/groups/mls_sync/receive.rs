@@ -4,6 +4,65 @@ impl<Context> MlsGroup<Context>
 where
     Context: XmtpSharedContext,
 {
+    fn post_process_non_retryable_error_transaction<Provider>(
+        &self,
+        provider: &Provider,
+        mls_group: &OpenMlsGroup,
+        envelope: &xmtp_proto::types::GroupMessage,
+        error: &GroupMessageProcessingError,
+    ) -> Result<(), GroupMessageProcessingError>
+    where
+        Provider: MlsProviderExt,
+    {
+        let db = provider.key_store().db();
+
+        // TXN-EDGE: non-retryable cursor advancement + failed-commit accounting - unresolved
+        // TODO(rich): Add log_err! macro/trait for swallowing errors
+        if let Err(update_cursor_error) = self.maybe_update_cursor(&db, envelope) {
+            // We don't need to propagate the error if the cursor fails to update - the worst case is
+            // that the non-retriable error is processed again
+            tracing::error!(
+                "Error updating cursor for non-retriable error: {update_cursor_error:?}"
+            );
+        } else if envelope.is_commit()
+            && let Err(accounting_error) = mls_group.mark_failed_commit_logged(
+                provider,
+                envelope.sequence_id(),
+                envelope.message.epoch(),
+                error,
+            )
+        {
+            tracing::error!(
+                "Error inserting commit entry for failed commit: {}",
+                accounting_error
+            );
+        }
+
+        Ok(())
+    }
+
+    fn post_process_non_retryable_error(
+        &self,
+        mls_group: &OpenMlsGroup,
+        envelope: &xmtp_proto::types::GroupMessage,
+        error: &GroupMessageProcessingError,
+    ) {
+        // Do not update the cursor if you have been removed from the group - you may be readded
+        // later
+        if !error.is_retryable()
+            && mls_group.is_active()
+            && let Err(transaction_error) = self.context.mls_storage().transaction(|conn| {
+                let key_store = conn.key_store();
+                let provider = XmtpOpenMlsProviderRef::new(&key_store);
+                self.post_process_non_retryable_error_transaction(
+                    &provider, mls_group, envelope, error,
+                )
+            })
+        {
+            tracing::error!("Error post-processing non-retryable error: {transaction_error:?}");
+        }
+    }
+
     pub(super) async fn post_process_message(
         &self,
         mls_group: &OpenMlsGroup,
@@ -39,36 +98,7 @@ where
                     e
                 );
 
-                // Do not update the cursor if you have been removed from the group - you may be readded
-                // later
-                if !e.is_retryable() && mls_group.is_active()
-                    && let Err(transaction_error) = self.context.mls_storage().transaction(|conn| {
-                    let storage = conn.key_store();
-                    let provider = XmtpOpenMlsProviderRef::new(&storage);
-                    // TXN-EDGE: non-retryable cursor advancement + failed-commit accounting - unresolved
-                    // TODO(rich): Add log_err! macro/trait for swallowing errors
-                    if let Err(update_cursor_error) =
-                        self.maybe_update_cursor(&storage.db(), envelope)
-                    {
-                        // We don't need to propagate the error if the cursor fails to update - the worst case is
-                        // that the non-retriable error is processed again
-                        tracing::error!("Error updating cursor for non-retriable error: {update_cursor_error:?}");
-                    } else if envelope.is_commit()
-                        && let Err(accounting_error) = mls_group.mark_failed_commit_logged(
-                        &provider,
-                        envelope.sequence_id(),
-                        envelope.message.epoch(),
-                        &e,
-                    ) {
-                        tracing::error!(
-                                "Error inserting commit entry for failed commit: {}",
-                                accounting_error
-                        );
-                    }
-                    Ok::<(), GroupMessageProcessingError>(())
-                }) {
-                    tracing::error!("Error post-processing non-retryable error: {transaction_error:?}");
-                };
+                self.post_process_non_retryable_error(mls_group, envelope, &e);
 
                 if let Err(accounting_error) = self
                     .process_group_message_error_for_fork_detection(
