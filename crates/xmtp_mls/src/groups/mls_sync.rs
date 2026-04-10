@@ -67,7 +67,7 @@ use prost::Message;
 use prost::bytes::Bytes;
 use sha2::Sha256;
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     mem::{Discriminant, discriminant},
     ops::RangeInclusive,
     time::Duration,
@@ -129,7 +129,11 @@ use xmtp_proto::{
 use xmtp_proto::{ShortHex, xmtp::mls::message_contents::EncodedContent};
 use zeroize::Zeroizing;
 
+mod events;
+mod membership;
 pub mod update_group_membership;
+pub(crate) use events::DeferredEvents;
+use membership::calculate_membership_changes_with_keypackages;
 
 #[derive(Debug, Error)]
 pub enum GroupMessageProcessingError {
@@ -1133,6 +1137,7 @@ where
         };
 
         let mut deferred_events = DeferredEvents::new();
+        // TXN-EDGE: cursor advancement + MLS message apply + transcript/event persistence - unresolved
         let identifier = provider.key_store().transaction(|conn| {
             let storage = conn.key_store();
             let db = storage.db();
@@ -1955,6 +1960,7 @@ where
                     .stage_and_validate_intent(mls_group, &intent, envelope)
                     .await;
 
+                // TXN-EDGE: cursor advancement + intent state transition + MLS apply/store writes - unresolved
                 self.context.mls_storage().transaction(|conn| {
                     let storage = conn.key_store();
                     let db = storage.db();
@@ -2501,6 +2507,7 @@ where
                         let has_staged_commit = staged_commit.is_some();
                         let last_payload = payloads_to_publish.last().ok_or(GroupError::UninitializedResult)?;
                         let intent_hash = sha256(last_payload);
+                        // TXN-EDGE: published intent hash + staged commit snapshot - unresolved
                         // removing this transaction causes missed messages
                         self.context.mls_storage().transaction(|conn| {
                             let storage = conn.key_store();
@@ -3676,137 +3683,6 @@ fn extract_message_sender(
     })
 }
 
-async fn calculate_membership_changes_with_keypackages<'a>(
-    context: &impl XmtpSharedContext,
-    group_id: &[u8],
-    new_group_membership: &'a GroupMembership,
-    old_group_membership: &'a GroupMembership,
-) -> Result<MembershipDiffWithKeyPackages, GroupError> {
-    let membership_diff = old_group_membership.diff(new_group_membership);
-
-    let identity = IdentityUpdates::new(&context);
-    let mut installation_diff = identity
-        .get_installation_diff(
-            &context.db(),
-            group_id,
-            old_group_membership,
-            new_group_membership,
-            &membership_diff,
-        )
-        .await?;
-
-    let mut new_installations = Vec::new();
-    let mut new_key_packages = Vec::new();
-    let mut new_failed_installations = Vec::new();
-
-    if !installation_diff.added_installations.is_empty() {
-        get_keypackages_for_installation_ids(
-            context,
-            installation_diff.added_installations,
-            &mut new_installations,
-            &mut new_key_packages,
-            &mut new_failed_installations,
-        )
-        .await?;
-    }
-
-    let mut failed_installations: HashSet<Vec<u8>> = old_group_membership
-        .failed_installations
-        .clone()
-        .into_iter()
-        .chain(new_failed_installations)
-        .collect();
-
-    let common: HashSet<_> = failed_installations
-        .intersection(&installation_diff.removed_installations)
-        .cloned()
-        .collect();
-
-    failed_installations.retain(|item| !common.contains(item));
-
-    installation_diff
-        .removed_installations
-        .retain(|item| !common.contains(item));
-
-    Ok(MembershipDiffWithKeyPackages::new(
-        new_installations,
-        new_key_packages,
-        installation_diff.removed_installations,
-        failed_installations.into_iter().collect(),
-    ))
-}
-
-#[allow(dead_code)]
-#[cfg(any(test, feature = "test-utils"))]
-async fn inject_failed_installations_for_test(
-    key_packages: &mut HashMap<
-        Vec<u8>,
-        Result<
-            xmtp_id::key_package::VerifiedKeyPackageV2,
-            xmtp_id::key_package::KeyPackageVerificationError,
-        >,
-    >,
-    failed_installations: &mut Vec<Vec<u8>>,
-) {
-    use crate::utils::test_mocks_helpers::{
-        get_test_mode_malformed_installations, is_test_mode_upload_malformed_keypackage,
-    };
-    if is_test_mode_upload_malformed_keypackage() {
-        let malformed_installations = get_test_mode_malformed_installations();
-        key_packages.retain(|id, _| !malformed_installations.contains(id));
-        failed_installations.extend(malformed_installations);
-    }
-}
-
-async fn get_keypackages_for_installation_ids(
-    context: impl XmtpSharedContext,
-    requested_installations: HashSet<Vec<u8>>,
-    fetched_installations: &mut Vec<Installation>,
-    fetched_key_packages: &mut Vec<KeyPackage>,
-    failed_installations: &mut Vec<Vec<u8>>,
-) -> Result<(), GroupError> {
-    let my_installation_id = context.installation_id().to_vec();
-    let store = MlsStore::new(context.clone());
-    #[allow(unused_mut)]
-    let mut key_packages = store
-        .get_key_packages_for_installation_ids(
-            requested_installations
-                .iter()
-                .filter(|installation| my_installation_id.ne(*installation))
-                .cloned()
-                .collect(),
-        )
-        .await?;
-
-    #[cfg(any(test, feature = "test-utils"))]
-    inject_failed_installations_for_test(&mut key_packages, failed_installations).await;
-
-    for (installation_id, result) in key_packages {
-        match result {
-            Ok(verified_key_package) => {
-                fetched_installations.push(Installation::from_verified_key_package(
-                    &verified_key_package,
-                )?);
-                fetched_key_packages.push(verified_key_package.inner.clone());
-            }
-            Err(_) => failed_installations.push(installation_id.clone()),
-        }
-    }
-
-    Ok(())
-}
-
-fn get_removed_leaf_nodes(
-    openmls_group: &mut OpenMlsGroup,
-    removed_installations: &HashSet<Vec<u8>>,
-) -> Vec<LeafNodeIndex> {
-    openmls_group
-        .members()
-        .filter(|member| removed_installations.contains(&member.signature_key))
-        .map(|member| member.index)
-        .collect()
-}
-
 /// Execute a commit-creating operation using a savepoint pattern.
 ///
 /// This function:
@@ -4222,40 +4098,5 @@ pub(crate) mod tests {
             result.is_ok(),
             "Invalid hex message_id should not cause error"
         );
-    }
-}
-
-/// Collects events that should be sent after database transactions complete
-#[derive(Default)]
-pub struct DeferredEvents {
-    worker_events: VecDeque<SyncWorkerEvent>,
-    local_events: VecDeque<LocalEvents>,
-}
-
-impl DeferredEvents {
-    pub fn new() -> Self {
-        Self {
-            worker_events: VecDeque::new(),
-            local_events: VecDeque::new(),
-        }
-    }
-
-    pub fn add_worker_event(&mut self, event: SyncWorkerEvent) {
-        self.worker_events.push_back(event);
-    }
-
-    pub fn add_local_event(&mut self, event: LocalEvents) {
-        self.local_events.push_back(event);
-    }
-
-    /// Send all collected events to their respective channels
-    pub fn send_all<Context: XmtpSharedContext>(&mut self, context: &Context) {
-        while let Some(event) = self.worker_events.pop_front() {
-            let _ = context.worker_events().send(event);
-        }
-
-        while let Some(event) = self.local_events.pop_front() {
-            let _ = context.local_events().send(event);
-        }
     }
 }

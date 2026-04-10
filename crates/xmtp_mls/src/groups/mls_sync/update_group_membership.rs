@@ -1,7 +1,11 @@
+use super::membership::{
+    calculate_membership_changes_with_keypackages, get_keypackages_for_installation_ids,
+};
 use super::*;
 use crate::groups::{
     GroupError, build_group_membership_extension,
     intents::{PostCommitAction, UpdateGroupMembershipIntentData},
+    mls_sync::membership::get_removed_leaf_nodes,
     update_required_capabilities_for_proposals,
     validated_commit::extract_group_membership,
 };
