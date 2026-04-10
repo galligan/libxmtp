@@ -90,6 +90,120 @@ impl<Context> MlsGroup<Context>
 where
     Context: XmtpSharedContext,
 {
+    fn process_own_message_transaction<Provider>(
+        &self,
+        provider: &Provider,
+        mls_group: &mut OpenMlsGroup,
+        intent: &StoredGroupIntent,
+        validation_result: Result<Option<(StagedCommit, ValidatedCommit)>, IntentResolutionError>,
+        identifier: &mut MessageIdentifierBuilder,
+        envelope: &GroupMessage,
+        allow_cursor_increment: bool,
+    ) -> Result<(), GroupMessageProcessingError>
+    where
+        Provider: MlsProviderExt,
+    {
+        let storage = provider.key_store();
+        let db = storage.db();
+        let cursor = envelope.cursor;
+        let intent_id = intent.id;
+
+        // TXN-EDGE: cursor advancement + intent state transition + MLS apply/store writes - unresolved
+        let requires_processing = if allow_cursor_increment {
+            self.maybe_update_cursor(&db, envelope)?
+        } else {
+            tracing::info!(
+                "will not call update cursor for group {}, with cursor {}, allow_cursor_increment is false",
+                hex::encode(envelope.group_id.as_slice()),
+                cursor
+            );
+            let current_cursor = db.get_last_cursor_for_originator(
+                &envelope.group_id,
+                envelope.entity_kind(),
+                envelope.originator_id(),
+            )?;
+            current_cursor.sequence_id < envelope.sequence_id()
+        };
+        if !requires_processing {
+            tracing::debug!(
+                "message @cursor=[{}] for group=[{}] created_at=[{}] no longer require processing, should be available in database",
+                envelope.cursor,
+                xmtp_common::fmt::debug_hex(&envelope.group_id),
+                envelope.created_ns
+            );
+
+            // early return if the message is already processed
+            // _NOTE_: Not early returning and re-processing a message that
+            // has already been processed, has the potential to result in forks.
+            // In some cases, we may want to roll back the cursor if we updated the
+            // cursor, but actually cannot process the message.
+            identifier.previously_processed(true);
+            return Ok(());
+        }
+        let result: Result<Option<Vec<u8>>, IntentResolutionError> = match validation_result {
+            Err(err) => Err(err),
+            Ok(validated_intent) => {
+                self.process_own_message(mls_group, validated_intent, intent, envelope, storage)
+            }
+        };
+        let (next_intent_state, internal_message_id) = match result {
+            Err(err) => {
+                if err.processing_error.is_retryable() {
+                    // Rollback the transaction so that we can retry
+                    return Err(err.processing_error);
+                }
+                if envelope.is_commit()
+                    && let Err(accounting_error) = mls_group.mark_failed_commit_logged(
+                        provider,
+                        cursor.sequence_id,
+                        envelope.message.epoch(),
+                        &err.processing_error,
+                    )
+                {
+                    tracing::error!(
+                        "Error inserting commit entry for failed self commit: {}",
+                        accounting_error
+                    );
+                }
+                (err.next_intent_state, None)
+            }
+            Ok(internal_message_id) => (IntentState::Committed, internal_message_id),
+        };
+        identifier.internal_id(internal_message_id.clone());
+
+        if next_intent_state == intent.state {
+            tracing::warn!(
+                "Intent [{}] is already in state [{:?}]",
+                intent_id,
+                next_intent_state
+            );
+            return Ok(());
+        }
+        match next_intent_state {
+            IntentState::ToPublish => {
+                db.set_group_intent_to_publish(intent_id)?;
+            }
+            IntentState::Committed => {
+                self.handle_metadata_update_from_intent(intent, storage)?;
+                db.set_group_intent_committed(intent_id, cursor)?;
+            }
+            IntentState::Published => {
+                tracing::error!(
+                    "Unexpected behaviour: returned intent state published from process_own_message"
+                );
+            }
+            IntentState::Error => {
+                tracing::error!("Intent [{}] moved to error status", intent_id);
+                db.set_group_intent_error(intent_id)?;
+            }
+            IntentState::Processed => {
+                tracing::debug!("Intent [{}] moved to Processed status", intent_id);
+                db.set_group_intent_processed(intent_id)?;
+            }
+        }
+        Ok(())
+    }
+
     /// This function is idempotent. No need to wrap in a transaction.
     ///
     /// # Parameters
@@ -166,7 +280,6 @@ where
         let db = self.context.db();
         let allow_epoch_increment = trust_message_order;
         let allow_cursor_increment = trust_message_order;
-        let cursor = envelope.cursor;
         if !allow_epoch_increment && envelope.is_commit() {
             return Err(GroupMessageProcessingError::EpochIncrementNotAllowed);
         }
@@ -223,109 +336,18 @@ where
                     .stage_and_validate_intent(mls_group, &intent, envelope)
                     .await;
 
-                // TXN-EDGE: cursor advancement + intent state transition + MLS apply/store writes - unresolved
                 self.context.mls_storage().transaction(|conn| {
-                    let storage = conn.key_store();
-                    let db = storage.db();
-                    let provider = XmtpOpenMlsProviderRef::new(&storage);
-                    let requires_processing = if allow_cursor_increment {
-                        self.maybe_update_cursor(&db, envelope)?
-                    } else {
-                        tracing::info!(
-                            "will not call update cursor for group {}, with cursor {}, allow_cursor_increment is false",
-                            hex::encode(envelope.group_id.as_slice()),
-                            cursor
-                        );
-                        let current_cursor = db.get_last_cursor_for_originator(
-                            &envelope.group_id,
-                            envelope.entity_kind(),
-                            envelope.originator_id(),
-                        )?;
-                        current_cursor.sequence_id < envelope.sequence_id()
-                    };
-                    if !requires_processing {
-                        tracing::debug!(
-                            "message @cursor=[{}] for group=[{}] created_at=[{}] no longer require processing, should be available in database",
-                            envelope.cursor,
-                            xmtp_common::fmt::debug_hex(&envelope.group_id),
-                            envelope.created_ns
-                        );
-
-                        // early return if the message is already processed
-                        // _NOTE_: Not early returning and re-processing a message that
-                        // has already been processed, has the potential to result in forks.
-                        // In some cases, we may want to roll back the cursor if we updated the
-                        // cursor, but actually cannot process the message.
-                        identifier.previously_processed(true);
-                        return Ok(());
-                    }
-                    let result: Result<Option<Vec<u8>>, IntentResolutionError> =
-                        match validation_result {
-                            Err(err) => Err(err),
-                            Ok(validated_intent) => self.process_own_message(
-                                mls_group,
-                                validated_intent,
-                                &intent,
-                                envelope,
-                                &storage,
-                            ),
-                        };
-                    let (next_intent_state, internal_message_id) = match result {
-                        Err(err) => {
-                            if err.processing_error.is_retryable() {
-                                // Rollback the transaction so that we can retry
-                                return Err(err.processing_error);
-                            }
-                            if envelope.is_commit()
-                                && let Err(accounting_error) = mls_group.mark_failed_commit_logged(
-                                    &provider,
-                                    cursor.sequence_id,
-                                    envelope.message.epoch(),
-                                    &err.processing_error,
-                                )
-                            {
-                                tracing::error!(
-                                    "Error inserting commit entry for failed self commit: {}",
-                                    accounting_error
-                                );
-                            }
-                            (err.next_intent_state, None)
-                        }
-                        Ok(internal_message_id) => (IntentState::Committed, internal_message_id),
-                    };
-                    identifier.internal_id(internal_message_id.clone());
-
-                    if next_intent_state == intent.state {
-                        tracing::warn!(
-                            "Intent [{}] is already in state [{:?}]",
-                            intent_id,
-                            next_intent_state
-                        );
-                        return Ok(());
-                    }
-                    match next_intent_state {
-                        IntentState::ToPublish => {
-                            db.set_group_intent_to_publish(intent_id)?;
-                        }
-                        IntentState::Committed => {
-                            self.handle_metadata_update_from_intent(&intent, &storage)?;
-                            db.set_group_intent_committed(intent_id, cursor)?;
-                        }
-                        IntentState::Published => {
-                            tracing::error!(
-                                "Unexpected behaviour: returned intent state published from process_own_message"
-                            );
-                        }
-                        IntentState::Error => {
-                            tracing::error!("Intent [{}] moved to error status", intent_id);
-                            db.set_group_intent_error(intent_id)?;
-                        }
-                        IntentState::Processed => {
-                            tracing::debug!("Intent [{}] moved to Processed status", intent_id);
-                            db.set_group_intent_processed(intent_id)?;
-                        }
-                    }
-                    Ok(())
+                    let key_store = conn.key_store();
+                    let provider = XmtpOpenMlsProviderRef::new(&key_store);
+                    self.process_own_message_transaction(
+                        &provider,
+                        mls_group,
+                        &intent,
+                        validation_result,
+                        &mut identifier,
+                        envelope,
+                        allow_cursor_increment,
+                    )
                 })?;
                 identifier.build()
             }
