@@ -1,4 +1,33 @@
 use super::*;
+use crate::groups::group_membership::GroupMembership;
+use crate::identity_updates::{IdentityStateContext, load_identity_updates};
+
+async fn refresh_membership_sequence_ids<Context>(
+    context: &Context,
+    membership: &mut GroupMembership,
+    inbox_ids: &[String],
+) -> Result<(), GroupError>
+where
+    Context: IdentityStateContext,
+{
+    if inbox_ids.is_empty() {
+        return Ok(());
+    }
+
+    let inbox_ids_refs: Vec<&str> = inbox_ids.iter().map(|inbox_id| inbox_id.as_str()).collect();
+    load_identity_updates(context.api(), &context.db(), &inbox_ids_refs).await?;
+    let latest_sequence_ids = context.db().get_latest_sequence_id(&inbox_ids_refs)?;
+
+    for inbox_id in inbox_ids {
+        let sequence_id = latest_sequence_ids
+            .get(inbox_id.as_str())
+            .copied()
+            .ok_or(GroupError::MissingSequenceId)?;
+        membership.add(inbox_id.clone(), sequence_id as u64);
+    }
+
+    Ok(())
+}
 
 impl<Context> MlsGroup<Context>
 where
@@ -301,32 +330,14 @@ where
                 if !intent_data.add_inbox_ids.is_empty() {
                     let extensions: Extensions<GroupContext> = openmls_group.extensions().clone();
                     let old_group_membership = extract_group_membership(&extensions)?;
-                    let inbox_ids_to_add: Vec<&str> = intent_data
-                        .add_inbox_ids
-                        .iter()
-                        .map(|s| s.as_str())
-                        .collect();
-
-                    load_identity_updates(
-                        self.context.api(),
-                        &self.context.db(),
-                        &inbox_ids_to_add,
-                    )
-                    .await?;
-
-                    let latest_sequence_ids = self
-                        .context
-                        .db()
-                        .get_latest_sequence_id(&inbox_ids_to_add)?;
 
                     let mut new_membership = old_group_membership.clone();
-                    for inbox_id in &intent_data.add_inbox_ids {
-                        let sequence_id = latest_sequence_ids
-                            .get(inbox_id.as_str())
-                            .copied()
-                            .ok_or(GroupError::MissingSequenceId)?;
-                        new_membership.add(inbox_id.clone(), sequence_id as u64);
-                    }
+                    refresh_membership_sequence_ids(
+                        &self.context,
+                        &mut new_membership,
+                        &intent_data.add_inbox_ids,
+                    )
+                    .await?;
 
                     let changes_with_kps = calculate_membership_changes_with_keypackages(
                         &self.context,
@@ -480,20 +491,12 @@ where
                 let mut new_membership = current_membership.clone();
 
                 if !inbox_ids_to_add.is_empty() {
-                    let inbox_ids_refs: Vec<&str> =
-                        inbox_ids_to_add.iter().map(|s| s.as_str()).collect();
-                    load_identity_updates(self.context.api(), &self.context.db(), &inbox_ids_refs)
-                        .await?;
-                    let latest_sequence_ids =
-                        self.context.db().get_latest_sequence_id(&inbox_ids_refs)?;
-
-                    for inbox_id in &inbox_ids_to_add {
-                        let sequence_id = latest_sequence_ids
-                            .get(inbox_id.as_str())
-                            .copied()
-                            .ok_or(GroupError::MissingSequenceId)?;
-                        new_membership.add(inbox_id.clone(), sequence_id as u64);
-                    }
+                    refresh_membership_sequence_ids(
+                        &self.context,
+                        &mut new_membership,
+                        &inbox_ids_to_add,
+                    )
+                    .await?;
                 }
 
                 for inbox_id in &inbox_ids_to_remove {
