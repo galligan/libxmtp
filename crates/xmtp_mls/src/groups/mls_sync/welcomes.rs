@@ -11,7 +11,7 @@ where
      */
     #[cfg_attr(any(test, feature = "test-utils"), tracing::instrument(level = "info", skip_all, fields(who = %self.context.inbox_id())))]
     #[cfg_attr(not(any(test, feature = "test-utils")), tracing::instrument(skip_all))]
-    pub(super) async fn send_welcomes(
+    pub(in crate::groups) async fn send_welcomes(
         &self,
         action: SendWelcomesAction,
         message_cursor: Option<i64>,
@@ -235,7 +235,7 @@ where
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
-    pub(super) fn prepare_group_messages(
+    pub(in crate::groups) fn prepare_group_messages(
         &self,
         payloads: Vec<(&[u8], bool)>,
     ) -> Result<Vec<GroupMessageInput>, GroupError> {

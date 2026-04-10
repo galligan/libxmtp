@@ -139,9 +139,10 @@ mod removals;
 pub mod update_group_membership;
 mod welcomes;
 pub(crate) use events::DeferredEvents;
+pub(crate) use helpers::decode_staged_commit;
+pub(super) use helpers::generate_commit_with_rollback;
 use helpers::{
-    decode_staged_commit, extract_message_sender, generate_commit_with_rollback,
-    handle_published_intent_send_failure,
+    extract_message_sender, handle_published_intent_send_failure,
 };
 use membership::calculate_membership_changes_with_keypackages;
 

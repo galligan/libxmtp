@@ -5,7 +5,7 @@ where
     Context: XmtpSharedContext,
 {
     #[tracing::instrument]
-    pub(super) async fn publish_intents(&self) -> Result<(), GroupError> {
+    pub(in crate::groups) async fn publish_intents(&self) -> Result<(), GroupError> {
         let db = self.context.db();
         self.load_mls_group_with_lock_async(async |mut mls_group| {
             let intents = db.find_group_intents(

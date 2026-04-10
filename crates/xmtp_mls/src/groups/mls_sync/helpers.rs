@@ -37,7 +37,7 @@ pub(super) fn extract_message_sender(
 /// The epoch is captured from within the transaction before the operation,
 /// ensuring it reflects the state used during the commit creation even if
 /// the database is updated between the transaction and when the caller uses it.
-pub(super) fn generate_commit_with_rollback<S, R, E, F>(
+pub(in crate::groups) fn generate_commit_with_rollback<S, R, E, F>(
     storage: &S,
     openmls_group: &mut OpenMlsGroup,
     operation: F,
@@ -104,7 +104,7 @@ where
     Ok((operation_result, staged_commit, group_epoch))
 }
 
-pub(super) fn decode_staged_commit(
+pub(crate) fn decode_staged_commit(
     data: &[u8],
 ) -> Result<StagedCommit, GroupMessageProcessingError> {
     Ok(xmtp_db::db_deserialize(data)?)
