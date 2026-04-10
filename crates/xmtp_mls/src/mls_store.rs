@@ -3,6 +3,8 @@
 //! from the data in DB/Api
 use std::collections::HashMap;
 
+use xmtp_api::{ApiClientWrapper, XmtpApi};
+use xmtp_api_d14n::protocol::XmtpQuery;
 use xmtp_api::ApiError;
 use xmtp_common::RetryableError;
 use xmtp_db::{
@@ -49,6 +51,24 @@ pub struct MlsStore<Context> {
     context: Context,
 }
 
+#[doc(hidden)]
+pub trait SyncQueryContext {
+    type ApiClient: XmtpApi + XmtpQuery;
+
+    fn sync_api(&self) -> &ApiClientWrapper<Self::ApiClient>;
+}
+
+impl<Context> SyncQueryContext for Context
+where
+    Context: XmtpSharedContext,
+{
+    type ApiClient = Context::ApiClient;
+
+    fn sync_api(&self) -> &ApiClientWrapper<Self::ApiClient> {
+        XmtpSharedContext::sync_api(self)
+    }
+}
+
 impl<Context> MlsStore<Context> {
     pub fn new(context: Context) -> Self {
         Self { context }
@@ -57,7 +77,7 @@ impl<Context> MlsStore<Context> {
 
 impl<Context> MlsStore<Context>
 where
-    Context: XmtpSharedContext,
+    Context: SyncQueryContext,
 {
     /// Query for group messages that have a `sequence_id` > than the highest cursor
     /// found in the local database
@@ -73,7 +93,12 @@ where
 
         Ok(messages)
     }
+}
 
+impl<Context> MlsStore<Context>
+where
+    Context: XmtpSharedContext,
+{
     /// Query for groups with optional filters
     ///
     /// Filters:
