@@ -682,7 +682,7 @@ where
         // and roll the transaction back, so we can fetch updates from the server before
         // being ready to process the message for a second time.
         let mut processed_message = None;
-        // TXN-EDGE: external message preflight + forced MLS reload - intentional rollback before durable apply
+        // TXN-EDGE: external message preflight + forced MLS reload - unresolved (intentional rollback before durable apply)
         let result = provider.key_store().transaction(|conn| {
             let storage = conn.key_store();
             let provider = XmtpOpenMlsProvider::new(storage);
