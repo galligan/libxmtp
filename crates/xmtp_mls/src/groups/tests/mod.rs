@@ -76,7 +76,7 @@ use xmtp_db::{
     consent_record::ConsentState,
     group::{ConversationType, GroupQueryArgs},
     group_intent::{IntentKind, IntentState},
-    group_message::{GroupMessageKind, MsgQueryArgs, StoredGroupMessage},
+    group_message::{ContentType, GroupMessageKind, MsgQueryArgs, StoredGroupMessage},
     prelude::*,
 };
 use xmtp_id::associations::Identifier;
