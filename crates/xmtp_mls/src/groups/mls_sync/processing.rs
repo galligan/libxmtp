@@ -783,7 +783,7 @@ where
                 });
             }
             let msg = self
-                .finalize_applied_staged_commit(
+                .persist_logged_staged_commit_transcript(
                     mls_group,
                     &validated_commit,
                     envelope_timestamp_ns as u64,
@@ -796,12 +796,7 @@ where
                     // will be missing. We mark the intent state as errored and continue.
                     next_intent_state: IntentState::Error,
                 })?;
-
-            if let Some((_, payload)) = &msg {
-                self.log_processed_staged_commit(mls_group, &validated_commit, payload, *cursor);
-            }
-
-            return Ok(msg.map(|(m, _)| m.id));
+            return Ok(msg);
         }
 
         let id: Option<Vec<u8>> = calculate_message_id_for_intent(intent)
@@ -1138,6 +1133,30 @@ where
         Ok(())
     }
 
+    fn persist_logged_staged_commit_transcript(
+        &self,
+        mls_group: &OpenMlsGroup,
+        validated_commit: &ValidatedCommit,
+        envelope_timestamp_ns: u64,
+        cursor: Cursor,
+        storage: &impl XmtpMlsStorageProvider,
+    ) -> Result<Option<Vec<u8>>, GroupMessageProcessingError> {
+        let transcript = self.finalize_applied_staged_commit(
+            mls_group,
+            validated_commit,
+            envelope_timestamp_ns,
+            cursor,
+            storage,
+        )?;
+
+        if let Some((msg, payload)) = &transcript {
+            self.log_processed_staged_commit(mls_group, validated_commit, payload, cursor);
+            return Ok(Some(msg.id.clone()));
+        }
+
+        Ok(None)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn process_external_staged_commit_message(
         &self,
@@ -1177,17 +1196,14 @@ where
             cursor.sequence_id as i64,
         )?;
 
-        let transcript = self.finalize_applied_staged_commit(
+        if let Some(message_id) = self.persist_logged_staged_commit_transcript(
             mls_group,
             &validated_commit,
             envelope_timestamp_ns as u64,
             cursor,
             storage,
-        )?;
-
-        if let Some((msg, payload)) = transcript {
-            identifier.internal_id(msg.id);
-            self.log_processed_staged_commit(mls_group, &validated_commit, &payload, cursor);
+        )? {
+            identifier.internal_id(message_id);
         }
 
         Ok(())
