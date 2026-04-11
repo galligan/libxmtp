@@ -5,7 +5,7 @@ use crate::tester;
 use xmtp_configuration::DeviceSyncUrls;
 use xmtp_db::{
     consent_record::ConsentState,
-    group::{ConversationType, StoredGroup},
+    group::{ConversationType, GroupQueryArgs, StoredGroup},
     group_message::MsgQueryArgs,
 };
 
