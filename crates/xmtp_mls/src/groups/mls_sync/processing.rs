@@ -767,36 +767,34 @@ where
                 intent.id
             );
 
-            if let Err(err) = mls_group.merge_staged_commit_logged(
-                &XmtpOpenMlsProviderRef::new(storage),
-                staged_commit,
-                &validated_commit,
-                cursor.sequence_id as i64,
-            ) {
-                tracing::error!("error merging commit: {err}");
-                return Err(IntentResolutionError {
-                    processing_error: err,
-                    // If the error is non-retriable, it means the commit failed to apply due to some
-                    // issue with the commit (e.g. encryption problem). We reset the intent state to
-                    // ToPublish so that we can republish it.
-                    next_intent_state: IntentState::ToPublish,
-                });
-            }
-            let msg = self
-                .persist_logged_staged_commit_transcript(
+            return self
+                .merge_staged_commit_and_persist_transcript(
                     mls_group,
+                    staged_commit,
                     &validated_commit,
                     envelope_timestamp_ns as u64,
                     *cursor,
                     storage,
                 )
-                .map_err(|err| IntentResolutionError {
-                    processing_error: err,
-                    // If it is a non-retriable error, the commit will be applied, but the transcript message
-                    // will be missing. We mark the intent state as errored and continue.
-                    next_intent_state: IntentState::Error,
-                })?;
-            return Ok(msg);
+                .map_err(|err| {
+                    let next_intent_state = match err {
+                        GroupMessageProcessingError::MergeStagedCommit(_) => {
+                            // If the error is non-retriable, it means the commit failed to apply due to some
+                            // issue with the commit (e.g. encryption problem). We reset the intent state to
+                            // ToPublish so that we can republish it.
+                            IntentState::ToPublish
+                        }
+                        _ => {
+                            // If it is a non-retriable error, the commit will be applied, but the transcript message
+                            // will be missing. We mark the intent state as errored and continue.
+                            IntentState::Error
+                        }
+                    };
+                    IntentResolutionError {
+                        processing_error: err,
+                        next_intent_state,
+                    }
+                });
         }
 
         let id: Option<Vec<u8>> = calculate_message_id_for_intent(intent)
@@ -1189,6 +1187,31 @@ where
         Ok(None)
     }
 
+    fn merge_staged_commit_and_persist_transcript(
+        &self,
+        mls_group: &mut OpenMlsGroup,
+        staged_commit: StagedCommit,
+        validated_commit: &ValidatedCommit,
+        envelope_timestamp_ns: u64,
+        cursor: Cursor,
+        storage: &impl XmtpMlsStorageProvider,
+    ) -> Result<Option<Vec<u8>>, GroupMessageProcessingError> {
+        mls_group.merge_staged_commit_logged(
+            &XmtpOpenMlsProviderRef::new(storage),
+            staged_commit,
+            validated_commit,
+            cursor.sequence_id as i64,
+        )?;
+
+        self.persist_logged_staged_commit_transcript(
+            mls_group,
+            validated_commit,
+            envelope_timestamp_ns,
+            cursor,
+            storage,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn process_external_staged_commit_message(
         &self,
@@ -1221,15 +1244,9 @@ where
 
         identifier.group_context(staged_commit.group_context().clone());
 
-        mls_group.merge_staged_commit_logged(
-            &XmtpOpenMlsProviderRef::new(storage),
-            staged_commit,
-            &validated_commit,
-            cursor.sequence_id as i64,
-        )?;
-
-        if let Some(message_id) = self.persist_logged_staged_commit_transcript(
+        if let Some(message_id) = self.merge_staged_commit_and_persist_transcript(
             mls_group,
+            staged_commit,
             &validated_commit,
             envelope_timestamp_ns as u64,
             cursor,
