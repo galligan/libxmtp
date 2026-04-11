@@ -559,9 +559,9 @@ where
                 .collect();
 
             // Broadcast the consent update changes
-            let _ = self
-                .local_events
-                .send(LocalEvents::PreferencesChanged(updates.clone()));
+            let _ = self.local_events.send(LocalEvents::PreferencesChanged(
+                crate::subscriptions::preference_updates_event(&self.context, updates.clone()),
+            ));
             let _ = self
                 .context
                 .worker_events()

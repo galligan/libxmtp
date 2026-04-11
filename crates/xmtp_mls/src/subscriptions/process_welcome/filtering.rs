@@ -25,7 +25,7 @@ impl WelcomeFilterConfig {
 
     /// Checks whether a group should be included in the stream based on the current
     /// welcome-processing filter policy.
-    async fn should_include_group<Context>(
+    pub(super) async fn should_include_group<Context>(
         &self,
         context: &Context,
         group: &MlsGroup<Context>,

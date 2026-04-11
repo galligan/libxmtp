@@ -149,7 +149,9 @@ where
                     let _ = self
                         .context
                         .local_events()
-                        .send(LocalEvents::PreferencesChanged(updated));
+                        .send(LocalEvents::PreferencesChanged(
+                            crate::subscriptions::preference_updates_event(&self.context, updated),
+                        ));
                 }
             }
             ContentProto::Acknowledge(DeviceSyncAcknowledge { .. }) => {

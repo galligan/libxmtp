@@ -8,7 +8,7 @@ use xmtp_common::Event;
 use xmtp_macro::log_event;
 use xmtp_proto::{
     api_client::XmtpMlsStreams,
-    types::{Cursor, GroupId, OriginatorId, SequenceId, Topic, TopicCursor},
+    types::{Cursor, GroupId, Topic, TopicCursor},
 };
 
 impl<'a, Context> StreamGroupMessages<'a, Context, MessagesApiSubscription<'a, Context::ApiClient>>
@@ -121,10 +121,6 @@ where
             .api()
             .subscribe_group_messages_with_cursors(&topic_cursor)
             .await?;
-        Ok((
-            stream,
-            new_group,
-            Some(Cursor::new(1 as SequenceId, 0 as OriginatorId)),
-        ))
+        Ok((stream, new_group, None))
     }
 }

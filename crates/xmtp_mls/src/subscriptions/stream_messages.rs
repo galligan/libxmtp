@@ -61,7 +61,7 @@ pub struct StreamGroupMessages<
     factory: Factory,
     context: Cow<'a, Context>,
     groups: GroupList,
-    add_queue: VecDeque<MlsGroup<Context>>,
+    add_queue: VecDeque<(MlsGroup<Context>, Option<GlobalCursor>)>,
     returned: Vec<Cursor>,
     got: Vec<Cursor>,
 }
@@ -124,8 +124,8 @@ where
             Waiting => {
                 tracing::trace!("stream messages in waiting state");
                 let this = self.as_mut().project();
-                if let Some(group) = this.add_queue.pop_front() {
-                    self.as_mut().resolve_group_additions(group);
+                if let Some((group, cursor)) = this.add_queue.pop_front() {
+                    self.as_mut().resolve_group_additions(group, cursor);
                     cx.waker().wake_by_ref();
                     return Poll::Pending;
                 }
@@ -260,22 +260,29 @@ where
         Poll::Pending
     }
 
-    /// Add the group to the group list
-    /// and transition the stream to Adding state
-    pub(super) fn add(mut self: Pin<&mut Self>, group: MlsGroup<C>) {
-        self.as_mut().project().add_queue.push_back(group);
+    pub(super) fn add_with_cursor(
+        mut self: Pin<&mut Self>,
+        group: MlsGroup<C>,
+        cursor: Option<GlobalCursor>,
+    ) {
+        self.as_mut().project().add_queue.push_back((group, cursor));
     }
 
     /// Add the group to the group list
     /// and transition the stream to Adding state
-    fn resolve_group_additions(mut self: Pin<&mut Self>, group: MlsGroup<C>) {
+    fn resolve_group_additions(
+        mut self: Pin<&mut Self>,
+        group: MlsGroup<C>,
+        cursor: Option<GlobalCursor>,
+    ) {
         tracing::debug!(
             "begin establishing new message stream to include group_id={}",
             hex::encode(&group.group_id)
         );
         let this = self.as_mut().project();
         if !this.groups.contains(&group.group_id) {
-            this.groups.add(&group.group_id, GlobalCursor::default());
+            let position = cursor.unwrap_or_default();
+            this.groups.add(&group.group_id, position);
         }
         let groups_with_positions = self.groups.groups_with_positions().clone();
         let future = Self::subscribe(self.context.clone(), groups_with_positions, group.group_id);

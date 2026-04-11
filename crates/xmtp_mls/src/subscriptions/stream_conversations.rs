@@ -176,8 +176,10 @@ where
             "Setting up conversation stream cursor",
         );
 
-        let events =
-            BroadcastGroupStream::new(BroadcastStream::new(context.local_events().subscribe()));
+        let events = BroadcastGroupStream::new(
+            BroadcastStream::new(context.local_events().subscribe()),
+            consent_states.is_some(),
+        );
 
         let subscription = context
             .api()

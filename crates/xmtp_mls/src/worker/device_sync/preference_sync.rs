@@ -1,6 +1,8 @@
 use super::*;
 use xmtp_common::time::now_ns;
 use xmtp_db::consent_record::StoredConsentRecord;
+use xmtp_db::group::DmIdExt;
+use xmtp_db::prelude::QueryGroup;
 use xmtp_db::user_preferences::{HmacKey, StoredUserPreferences};
 use xmtp_proto::ConversionError;
 use xmtp_proto::xmtp::device_sync::content::HmacKeyUpdate as HmacKeyUpdateProto;
@@ -23,6 +25,8 @@ where
         &self,
         updates: Vec<PreferenceUpdate>,
     ) -> Result<Vec<PreferenceUpdate>, ClientError> {
+        let updates = self.expand_sync_preference_updates(updates)?;
+
         self.send_device_sync_message(ContentProto::PreferenceUpdates(PreferenceUpdates {
             updates: updates.clone().into_iter().map(From::from).collect(),
         }))
@@ -34,6 +38,49 @@ where
         });
 
         Ok(updates)
+    }
+
+    fn expand_sync_preference_updates(
+        &self,
+        updates: Vec<PreferenceUpdate>,
+    ) -> Result<Vec<PreferenceUpdate>, ClientError> {
+        let mut expanded = Vec::with_capacity(updates.len());
+        let db = self.context.db();
+        let inbox_id = self.context.inbox_id().to_string();
+
+        for update in updates {
+            if let PreferenceUpdate::Consent(record) = &update {
+                expanded.push(update.clone());
+
+                if record.entity_type == xmtp_db::consent_record::ConsentType::ConversationId {
+                    let group_id = hex::decode(&record.entity).ok();
+                    let peer_inbox_update = group_id
+                        .as_deref()
+                        .and_then(|group_id| db.find_group(group_id).ok().flatten())
+                        .filter(|group| group.conversation_type == xmtp_db::group::ConversationType::Dm)
+                        .and_then(|group| group.dm_id)
+                        .map(|dm_id| dm_id.other_inbox_id(&inbox_id))
+                        .filter(|peer_inbox_id| peer_inbox_id != &inbox_id)
+                        .map(|peer_inbox_id| {
+                            PreferenceUpdate::Consent(StoredConsentRecord::new(
+                                xmtp_db::consent_record::ConsentType::InboxId,
+                                record.state,
+                                peer_inbox_id,
+                            ))
+                        });
+
+                    if let Some(peer_update) = peer_inbox_update {
+                        expanded.push(peer_update);
+                    }
+                }
+
+                continue;
+            }
+
+            expanded.push(update);
+        }
+
+        Ok(expanded)
     }
 
     pub(crate) async fn cycle_hmac(&self) -> Result<(), ClientError> {

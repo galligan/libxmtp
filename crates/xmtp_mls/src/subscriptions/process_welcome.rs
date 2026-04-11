@@ -6,8 +6,11 @@ use crate::context::XmtpSharedContext;
 use crate::{groups::MlsGroup, subscriptions::WelcomeOrGroup};
 use filtering::WelcomeFilterConfig;
 use std::collections::HashSet;
-use xmtp_db::{consent_record::ConsentState, group::ConversationType};
-use xmtp_proto::types::{Cursor, WelcomeMessage};
+use xmtp_db::{
+    consent_record::ConsentState, encrypted_store::refresh_state::EntityKind,
+    group::ConversationType, prelude::QueryRefreshState,
+};
+use xmtp_proto::types::{Cursor, GlobalCursor, WelcomeMessage};
 
 /// Future for processing `WelcomeorGroup`
 pub struct ProcessWelcomeFuture<Context> {
@@ -149,8 +152,10 @@ where
                 );
                 // sync welcome from the network
                 if let Some(group) = self.on_welcome(welcome).await? {
+                    let stream_seed_cursor =
+                        self.stream_attach_cursor_for_group(&group.group_id)?;
                     ProcessWelcomeResult::New {
-                        group,
+                        group: group.with_stream_seed_cursor(stream_seed_cursor),
                         id: welcome.cursor,
                     }
                 } else {
@@ -158,9 +163,32 @@ where
                     ProcessWelcomeResult::IgnoreId { id: welcome.cursor }
                 }
             }
-            Group(ref id) => {
+            Group {
+                ref id,
+                catch_up_before_stream,
+                ref attach_cursor,
+                replay_after_ns,
+            } => {
                 tracing::info!("stream got existing group, pulling from db.");
-                let (group, stored_group) = MlsGroup::new_cached(self.context.clone(), id)?;
+                let (mut group, mut stored_group) = MlsGroup::new_cached(self.context.clone(), id)?;
+
+                if catch_up_before_stream
+                    && self
+                        .filters
+                        .should_include_group(&self.context, &group, false)
+                        .await?
+                {
+                    group.sync().await?;
+                    (group, stored_group) = MlsGroup::new_cached(self.context.clone(), id)?;
+                }
+                let stream_seed_cursor = if attach_cursor.is_some() {
+                    attach_cursor.clone()
+                } else {
+                    self.stream_attach_cursor_for_group(id.as_slice())?
+                };
+                let group = group
+                    .with_stream_seed_cursor(stream_seed_cursor)
+                    .with_stream_replay_after_ns(replay_after_ns);
 
                 ProcessWelcomeResult::NewStored {
                     group,
@@ -208,5 +236,17 @@ where
     /// Load a group from disk by its welcome_id
     fn load_from_store(&self, cursor: Cursor) -> Result<Option<MlsGroup<Context>>> {
         loading::load_from_store(&self.context, cursor)
+    }
+
+    fn stream_attach_cursor_for_group(&self, group_id: &[u8]) -> Result<Option<GlobalCursor>> {
+        Ok(self
+            .context
+            .db()
+            .get_last_cursor_for_ids(
+                &[group_id.to_vec()],
+                &[EntityKind::ApplicationMessage, EntityKind::CommitMessage],
+            )?
+            .get(group_id)
+            .cloned())
     }
 }
