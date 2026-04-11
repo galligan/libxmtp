@@ -4684,6 +4684,94 @@ async fn test_send_message_after_min_version_update_gets_expected_error() {
     assert!(result.is_ok());
 }
 
+#[xmtp_common::test]
+async fn test_protocol_version_pause_does_not_advance_commit_cursor() {
+    let mut amal_version = VersionInfo::default();
+    amal_version.test_update_version(
+        increment_patch_version(amal_version.pkg_version())
+            .unwrap()
+            .as_str(),
+    );
+
+    let amal =
+        ClientBuilder::new_test_client_with_version(&generate_local_wallet(), amal_version.clone())
+            .await;
+    let bo = ClientBuilder::new_test_client(&generate_local_wallet()).await;
+
+    let amal_group = amal.create_group(None, None).unwrap();
+    amal_group
+        .add_members(&[bo.context.identity.inbox_id()])
+        .await
+        .unwrap();
+
+    bo.sync_welcomes().await.unwrap();
+    let binding = bo.find_groups(GroupQueryArgs::default()).unwrap();
+    let bo_group = binding.first().unwrap();
+    bo_group.sync().await.unwrap();
+
+    let commit_cursor_before = bo
+        .context
+        .db()
+        .get_last_cursor_for_originator(
+            &bo_group.group_id,
+            EntityKind::CommitMessage,
+            Originators::MLS_COMMITS,
+        )
+        .unwrap();
+
+    amal_group
+        .update_group_min_version_to_match_self()
+        .await
+        .unwrap();
+    amal_group.sync().await.unwrap();
+
+    bo_group.sync().await.unwrap();
+    assert_eq!(
+        bo_group.paused_for_version().unwrap(),
+        Some(amal.version_info().pkg_version().to_string())
+    );
+
+    let commit_cursor_while_paused = bo
+        .context
+        .db()
+        .get_last_cursor_for_originator(
+            &bo_group.group_id,
+            EntityKind::CommitMessage,
+            Originators::MLS_COMMITS,
+        )
+        .unwrap();
+    assert_eq!(commit_cursor_before, commit_cursor_while_paused);
+
+    let mut bo_version = bo.version_info().clone();
+    bo_version.test_update_version(
+        increment_patch_version(bo_version.pkg_version())
+            .unwrap()
+            .as_str(),
+    );
+    let bo = ClientBuilder::from_client(bo)
+        .version(bo_version)
+        .build()
+        .await
+        .unwrap();
+
+    let binding = bo.find_groups(GroupQueryArgs::default()).unwrap();
+    let bo_group = binding.first().unwrap();
+    bo_group.sync().await.unwrap();
+
+    assert_eq!(bo_group.paused_for_version().unwrap(), None);
+
+    let commit_cursor_after_upgrade = bo
+        .context
+        .db()
+        .get_last_cursor_for_originator(
+            &bo_group.group_id,
+            EntityKind::CommitMessage,
+            Originators::MLS_COMMITS,
+        )
+        .unwrap();
+    assert!(commit_cursor_after_upgrade.sequence_id > commit_cursor_before.sequence_id);
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_can_make_inbox_with_a_bad_key_package_an_admin() {
