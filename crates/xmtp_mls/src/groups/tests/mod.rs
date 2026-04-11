@@ -3588,6 +3588,14 @@ async fn skip_already_processed_intents() {
         )
         .unwrap();
     assert_eq!(processed_intents_before.len(), 2); // key_update and send_message
+    let key_update_intent = processed_intents_before
+        .iter()
+        .find(|intent| intent.kind == IntentKind::KeyUpdate)
+        .unwrap();
+    let key_update_cursor = (
+        key_update_intent.sequence_id,
+        key_update_intent.originator_id,
+    );
     let send_intent = processed_intents_before
         .iter()
         .find(|intent| intent.kind == IntentKind::SendMessage)
@@ -3610,8 +3618,10 @@ async fn skip_already_processed_intents() {
         })
         .collect::<Vec<_>>();
 
-    let process_result = bo_group.sync_until_intent_resolved(send_intent.id).await;
-    assert_ok!(process_result);
+    for intent_id in [key_update_intent.id, send_intent.id] {
+        let process_result = bo_group.sync_until_intent_resolved(intent_id).await;
+        assert_ok!(process_result);
+    }
 
     let processed_intents_after = bo_client
         .context
@@ -3627,6 +3637,18 @@ async fn skip_already_processed_intents() {
         .iter()
         .find(|intent| intent.id == send_intent.id)
         .unwrap();
+    let key_update_intent_after = processed_intents_after
+        .iter()
+        .find(|intent| intent.id == key_update_intent.id)
+        .unwrap();
+    assert_eq!(key_update_intent_after.state, IntentState::Processed);
+    assert_eq!(
+        (
+            key_update_intent_after.sequence_id,
+            key_update_intent_after.originator_id
+        ),
+        key_update_cursor
+    );
     assert_eq!(send_intent_after.state, IntentState::Processed);
     assert_eq!(
         (send_intent_after.sequence_id, send_intent_after.originator_id),
