@@ -91,6 +91,29 @@ impl<Context> MlsGroup<Context>
 where
     Context: XmtpSharedContext,
 {
+    fn should_process_after_cursor_check(
+        &self,
+        db: &impl DbQuery,
+        envelope: &GroupMessage,
+        allow_cursor_increment: bool,
+    ) -> Result<bool, StorageError> {
+        if allow_cursor_increment {
+            self.maybe_update_cursor(db, envelope)
+        } else {
+            tracing::info!(
+                "will not call update cursor for group {}, with cursor {}, allow_cursor_increment is false",
+                hex::encode(envelope.group_id.as_slice()),
+                envelope.cursor
+            );
+            let current_cursor = db.get_last_cursor_for_originator(
+                &envelope.group_id,
+                envelope.entity_kind(),
+                envelope.originator_id(),
+            )?;
+            Ok(current_cursor.sequence_id < envelope.sequence_id())
+        }
+    }
+
     fn resolve_own_message_result<Provider>(
         &self,
         provider: &Provider,
@@ -189,21 +212,11 @@ where
         let intent_id = intent.id;
 
         // TXN-EDGE: cursor advancement + intent state transition + MLS apply/store writes - unresolved
-        let requires_processing = if allow_cursor_increment {
-            self.maybe_update_cursor(&storage.db(), envelope)?
-        } else {
-            tracing::info!(
-                "will not call update cursor for group {}, with cursor {}, allow_cursor_increment is false",
-                hex::encode(envelope.group_id.as_slice()),
-                cursor
-            );
-            let current_cursor = storage.db().get_last_cursor_for_originator(
-                &envelope.group_id,
-                envelope.entity_kind(),
-                envelope.originator_id(),
-            )?;
-            current_cursor.sequence_id < envelope.sequence_id()
-        };
+        let requires_processing = self.should_process_after_cursor_check(
+            &storage.db(),
+            envelope,
+            allow_cursor_increment,
+        )?;
         if !requires_processing {
             tracing::debug!(
                 "message @cursor=[{}] for group=[{}] created_at=[{}] no longer require processing, should be available in database",
@@ -272,21 +285,8 @@ where
         );
 
         // TXN-EDGE: cursor advancement + MLS message apply + transcript/event persistence - unresolved
-        let requires_processing = if allow_cursor_increment {
-            self.maybe_update_cursor(&db, envelope)?
-        } else {
-            tracing::info!(
-                "will not call update cursor for group {}, with cursor {}, allow_cursor_increment is false",
-                hex::encode(envelope.group_id.as_slice()),
-                *cursor
-            );
-            let current_cursor = db.get_last_cursor_for_originator(
-                &envelope.group_id,
-                envelope.entity_kind(),
-                envelope.originator_id(),
-            )?;
-            current_cursor.sequence_id < envelope.cursor.sequence_id
-        };
+        let requires_processing =
+            self.should_process_after_cursor_check(&db, envelope, allow_cursor_increment)?;
         if !requires_processing {
             // early return if the message is already processed
             // _NOTE_: Not early returning and re-processing a message that
