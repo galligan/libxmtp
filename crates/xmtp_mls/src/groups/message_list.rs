@@ -65,7 +65,11 @@ where
         self.count_messages_with_conn(args, conn)
     }
 
-    pub fn count_messages_with_conn<C>(&self, args: &MsgQueryArgs, conn: C) -> Result<i64, GroupError>
+    pub fn count_messages_with_conn<C>(
+        &self,
+        args: &MsgQueryArgs,
+        conn: C,
+    ) -> Result<i64, GroupError>
     where
         C: QueryGroupMessage,
     {

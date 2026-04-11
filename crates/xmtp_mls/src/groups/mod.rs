@@ -15,6 +15,7 @@ pub mod members;
 mod message_fields;
 pub mod message_list;
 mod message_ops;
+mod message_settings;
 pub(super) mod mls_ext;
 pub(super) mod mls_sync;
 pub mod oneshot;
@@ -77,11 +78,11 @@ use xmtp_configuration::{
 use xmtp_content_types::leave_request::LeaveRequestCodec;
 use xmtp_content_types::{ContentCodec, encoded_content_to_bytes};
 use xmtp_cryptography::configuration::ED25519_KEY_LENGTH;
+use xmtp_db::consent_record::ConsentType;
 use xmtp_db::local_commit_log::LocalCommitLog;
 use xmtp_db::pending_remove::QueryPendingRemove;
 use xmtp_db::prelude::*;
 use xmtp_db::user_preferences::HmacKey;
-use xmtp_db::{Fetch, consent_record::ConsentType};
 use xmtp_db::{NotFound, StorageError, refresh_state::EntityKind};
 use xmtp_db::{Store, StoreOrIgnore};
 use xmtp_db::{
@@ -97,10 +98,8 @@ use xmtp_id::associations::Identifier;
 use xmtp_id::{AsIdRef, InboxId, InboxIdRef};
 use xmtp_mls_common::{
     group::{DMMetadataOptions, GroupMetadataOptions},
-    group_metadata::{DmMembers, GroupMetadata, GroupMetadataError, extract_group_metadata},
-    group_mutable_metadata::{
-        GroupMutableMetadata, GroupMutableMetadataError, MessageDisappearingSettings, MetadataField,
-    },
+    group_metadata::{DmMembers, GroupMetadata, extract_group_metadata},
+    group_mutable_metadata::{GroupMutableMetadata, GroupMutableMetadataError, MetadataField},
 };
 use xmtp_proto::xmtp::mls::message_contents::content_types::LeaveRequest;
 use xmtp_proto::{types::Cursor, xmtp::mls::message_contents::OneshotMessage};
@@ -1432,73 +1431,6 @@ where
         }
     }
 
-    pub async fn update_conversation_message_disappearing_settings(
-        &self,
-        settings: MessageDisappearingSettings,
-    ) -> Result<(), GroupError> {
-        self.ensure_not_paused().await?;
-
-        self.update_conversation_message_disappear_from_ns(settings.from_ns)
-            .await?;
-        self.update_conversation_message_disappear_in_ns(settings.in_ns)
-            .await
-    }
-
-    pub async fn remove_conversation_message_disappearing_settings(
-        &self,
-    ) -> Result<(), GroupError> {
-        self.ensure_not_paused().await?;
-
-        self.update_conversation_message_disappearing_settings(
-            MessageDisappearingSettings::default(),
-        )
-        .await
-    }
-
-    #[cfg_attr(any(test, feature = "test-utils"), tracing::instrument(level = "info", fields(who = %self.context.inbox_id()), skip(self)))]
-    #[cfg_attr(
-        not(any(test, feature = "test-utils")),
-        tracing::instrument(level = "trace", skip(self))
-    )]
-    async fn update_conversation_message_disappear_from_ns(
-        &self,
-        expire_from_ms: i64,
-    ) -> Result<(), GroupError> {
-        self.ensure_not_paused().await?;
-
-        let intent_data: Vec<u8> =
-            UpdateMetadataIntentData::new_update_conversation_message_disappear_from_ns(
-                expire_from_ms,
-            )
-            .into();
-        let intent = QueueIntent::metadata_update()
-            .data(intent_data)
-            .queue(self)?;
-        let _ = self.sync_until_intent_resolved(intent.id).await?;
-        Ok(())
-    }
-
-    #[cfg_attr(any(test, feature = "test-utils"), tracing::instrument(level = "info", fields(who = %self.context.inbox_id()), skip(self)))]
-    #[cfg_attr(
-        not(any(test, feature = "test-utils")),
-        tracing::instrument(level = "trace", skip(self))
-    )]
-    async fn update_conversation_message_disappear_in_ns(
-        &self,
-        expire_in_ms: i64,
-    ) -> Result<(), GroupError> {
-        self.ensure_not_paused().await?;
-
-        let intent_data: Vec<u8> =
-            UpdateMetadataIntentData::new_update_conversation_message_disappear_in_ns(expire_in_ms)
-                .into();
-        let intent = QueueIntent::metadata_update()
-            .data(intent_data)
-            .queue(self)?;
-        let _ = self.sync_until_intent_resolved(intent.id).await?;
-        Ok(())
-    }
-
     /// If group is not paused, will return None, otherwise will return the version that the group is paused for
     pub fn paused_for_version(&self) -> Result<Option<String>, GroupError> {
         let paused_for_version = self.context.db().get_group_paused_version(&self.group_id)?;
@@ -1511,38 +1443,6 @@ where
             Err(GroupError::GroupPausedUntilUpdate(min_version))
         } else {
             Ok(())
-        }
-    }
-
-    pub fn conversation_message_disappearing_settings(
-        &self,
-    ) -> Result<MessageDisappearingSettings, GroupError> {
-        let metadata = self.mutable_metadata()?;
-        Self::conversation_message_disappearing_settings_from_extensions(&metadata)
-    }
-
-    pub fn conversation_message_disappearing_settings_from_extensions(
-        mutable_metadata: &GroupMutableMetadata,
-    ) -> Result<MessageDisappearingSettings, GroupError> {
-        let disappear_from_ns = mutable_metadata
-            .attributes
-            .get(&MetadataField::MessageDisappearFromNS.to_string());
-        let disappear_in_ns = mutable_metadata
-            .attributes
-            .get(&MetadataField::MessageDisappearInNS.to_string());
-
-        if let (Some(Ok(message_disappear_from_ns)), Some(Ok(message_disappear_in_ns))) = (
-            disappear_from_ns.map(|s| s.parse::<i64>()),
-            disappear_in_ns.map(|s| s.parse::<i64>()),
-        ) {
-            Ok(MessageDisappearingSettings::new(
-                message_disappear_from_ns,
-                message_disappear_in_ns,
-            ))
-        } else {
-            Err(GroupError::MetadataPermissionsError(
-                GroupMetadataError::MissingExtension.into(),
-            ))
         }
     }
 
@@ -1832,24 +1732,6 @@ where
         self.load_mls_group_with_lock(self.context.mls_storage(), |mls_group| {
             Ok(extract_group_permissions(&mls_group).map_err(MetadataPermissionsError::from)?)
         })
-    }
-
-    /// Fetches the message disappearing settings for a given group ID.
-    ///
-    /// Returns `Some(MessageDisappearingSettings)` if the group exists and has valid settings,
-    /// `None` if the group or settings are missing, or `Err(ClientError)` on a database error.
-    pub fn disappearing_settings(&self) -> Result<Option<MessageDisappearingSettings>, GroupError> {
-        let conn = self.context.db();
-        let stored_group: Option<StoredGroup> = conn.fetch(&self.group_id)?;
-
-        let settings = stored_group.and_then(|group| {
-            let from_ns = group.message_disappear_from_ns?;
-            let in_ns = group.message_disappear_in_ns?;
-
-            Some(MessageDisappearingSettings { from_ns, in_ns })
-        });
-
-        Ok(settings)
     }
 
     /// Find all the duplicate dms for this group
