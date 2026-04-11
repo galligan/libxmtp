@@ -4,9 +4,13 @@ use crate::groups::send_message_opts::SendMessageOpts;
 use crate::tester;
 use crate::utils::ClientTester;
 use crate::utils::fixtures::{alix, bo};
+use crate::worker::device_sync::{ArchiveOptions, SyncMetric};
 use futures::StreamExt;
 use std::sync::Arc;
+use std::time::Duration;
+use xmtp_configuration::DeviceSyncUrls;
 use xmtp_cryptography::utils::generate_local_wallet;
+use xmtp_db::consent_record::ConsentState;
 use xmtp_db::group::GroupQueryArgs;
 
 #[xmtp_common::timeout(std::time::Duration::from_secs(10))]
@@ -247,6 +251,141 @@ async fn test_duplicate_dm_streamed_when_included() {
             .expect("second streamed DM should be valid");
 
     assert_eq!(streamed_dm2.group_id, dm2.group_id);
+}
+
+#[xmtp_common::timeout(Duration::from_secs(20))]
+#[rstest::rstest]
+#[xmtp_common::test]
+async fn test_stream_conversations_reacts_to_allowed_consent_transition() {
+    tester!(sender, with_name: "sender");
+    tester!(receiver, with_name: "receiver");
+
+    let group = sender.create_group(None, None).unwrap();
+    group.add_members(&[receiver.inbox_id()]).await.unwrap();
+
+    sender.sync_welcomes().await.unwrap();
+    receiver.sync_welcomes().await.unwrap();
+    xmtp_common::time::sleep(Duration::from_millis(100)).await;
+
+    group.update_consent_state(ConsentState::Denied).unwrap();
+
+    let stream = StreamConversations::new(
+        &sender.context,
+        None,
+        false,
+        Some(vec![ConsentState::Allowed]),
+    )
+    .await
+    .unwrap();
+    futures::pin_mut!(stream);
+
+    let denied_result = xmtp_common::time::timeout(Duration::from_secs(2), stream.next()).await;
+    assert!(
+        denied_result.is_err(),
+        "Should not stream denied conversations"
+    );
+
+    group.update_consent_state(ConsentState::Allowed).unwrap();
+
+    let allowed_group = xmtp_common::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .expect("conversation should become eligible after consent is allowed")
+        .expect("stream should produce an item")
+        .expect("streamed conversation should be valid");
+
+    assert_eq!(allowed_group.group_id, group.group_id);
+}
+
+#[xmtp_common::timeout(Duration::from_secs(30))]
+#[rstest::rstest]
+#[xmtp_common::test(unwrap_try = true)]
+#[cfg_attr(target_arch = "wasm32", ignore)]
+async fn test_stream_conversations_reacts_to_device_sync_allowed_consent_transition() {
+    tester!(alix1, sync_worker);
+    tester!(bo);
+
+    let dm = alix1.find_or_create_dm(bo.inbox_id(), None).await?;
+    tester!(alix2, from: alix1);
+
+    alix1.test_has_same_sync_group_as(&alix2).await?;
+    alix2
+        .device_sync_client()
+        .send_sync_request(
+            ArchiveOptions::msgs_and_consent(),
+            DeviceSyncUrls::LOCAL_ADDRESS.to_string(),
+        )
+        .await?;
+    alix1.sync_all_device_sync_groups().await?;
+    alix1
+        .worker()
+        .register_interest(SyncMetric::PayloadSent, 1)
+        .wait()
+        .await?;
+
+    alix2.sync_all_device_sync_groups().await?;
+    alix2
+        .worker()
+        .register_interest(SyncMetric::PayloadProcessed, 1)
+        .wait()
+        .await?;
+
+    alix1.worker().clear_metric(SyncMetric::ConsentSent);
+    dm.update_consent_state(ConsentState::Denied)?;
+    alix1
+        .worker()
+        .register_interest(SyncMetric::ConsentSent, 1)
+        .wait()
+        .await?;
+
+    alix2.worker().clear_metric(SyncMetric::ConsentReceived);
+    alix2.sync_all_device_sync_groups().await?;
+    alix2
+        .worker()
+        .register_interest(SyncMetric::ConsentReceived, 1)
+        .wait()
+        .await?;
+
+    let alix2_dm = alix2.group(&dm.group_id)?;
+    assert_eq!(alix2_dm.consent_state()?, ConsentState::Denied);
+
+    let stream = StreamConversations::new(
+        &alix2.context,
+        Some(ConversationType::Dm),
+        false,
+        Some(vec![ConsentState::Allowed]),
+    )
+    .await?;
+    futures::pin_mut!(stream);
+
+    let denied_result = xmtp_common::time::timeout(Duration::from_secs(2), stream.next()).await;
+    assert!(
+        denied_result.is_err(),
+        "device-sync delivered denied consent should keep the DM out of the conversation stream"
+    );
+
+    alix1.worker().clear_metric(SyncMetric::ConsentSent);
+    dm.update_consent_state(ConsentState::Allowed)?;
+    alix1
+        .worker()
+        .register_interest(SyncMetric::ConsentSent, 1)
+        .wait()
+        .await?;
+
+    alix2.worker().clear_metric(SyncMetric::ConsentReceived);
+    alix2.sync_all_device_sync_groups().await?;
+    alix2
+        .worker()
+        .register_interest(SyncMetric::ConsentReceived, 1)
+        .wait()
+        .await?;
+
+    let allowed_dm = xmtp_common::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .expect("conversation stream should re-emit the DM once consent becomes allowed")
+        .expect("stream should produce an item")
+        .expect("streamed conversation should be valid");
+
+    assert_eq!(allowed_dm.group_id, dm.group_id);
 }
 
 #[xmtp_common::timeout(std::time::Duration::from_secs(120))]

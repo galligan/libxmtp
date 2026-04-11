@@ -1,6 +1,10 @@
+use diesel::{ExpressionMethods, QueryDsl, RunQueryDsl};
+use xmtp_db::prelude::QueryConsentRecord;
+use xmtp_db::schema::consent_records::dsl as consent_dsl;
 use crate::groups::send_message_opts::SendMessageOpts;
-use xmtp_db::consent_record::ConsentState;
+use xmtp_db::consent_record::{ConsentState, ConsentType};
 
+use crate::context::XmtpSharedContext;
 use crate::tester;
 
 #[xmtp_common::test(unwrap_try = true)]
@@ -32,4 +36,46 @@ async fn test_auto_consent_to_own_group() {
 
     let g2 = alix2.group(&g.group_id)?;
     assert_eq!(g2.consent_state()?, ConsentState::Allowed);
+}
+
+#[xmtp_common::test(unwrap_try = true)]
+async fn test_dm_consent_falls_back_to_peer_inbox_record() {
+    tester!(alix);
+    tester!(bo);
+
+    let dm = alix.find_or_create_dm(bo.inbox_id(), None).await?;
+    dm.update_consent_state(ConsentState::Denied)?;
+
+    let db = alix.context.db();
+    let conversation_id = hex::encode(&dm.group_id);
+    let peer_inbox_id = bo.inbox_id().to_string();
+
+    let conversation_record =
+        db.get_consent_record(conversation_id.clone(), ConsentType::ConversationId)?;
+    let inbox_record = db.get_consent_record(peer_inbox_id.clone(), ConsentType::InboxId)?;
+
+    assert_eq!(
+        conversation_record.as_ref().map(|record| record.state),
+        Some(ConsentState::Denied)
+    );
+    assert_eq!(
+        inbox_record.as_ref().map(|record| record.state),
+        Some(ConsentState::Denied)
+    );
+
+    db.raw_query_write(|conn| {
+        diesel::delete(
+            consent_dsl::consent_records
+                .filter(consent_dsl::entity_type.eq(ConsentType::ConversationId))
+                .filter(consent_dsl::entity.eq(&conversation_id)),
+        )
+        .execute(conn)
+    })?;
+
+    assert!(
+        db.get_consent_record(conversation_id, ConsentType::ConversationId)?
+            .is_none(),
+        "the explicit DM conversation consent should be absent so the fallback path is exercised"
+    );
+    assert_eq!(dm.consent_state()?, ConsentState::Denied);
 }

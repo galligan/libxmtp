@@ -507,6 +507,148 @@ async fn test_stream_all_messages_filters_conversations_created_after_init() {
 #[xmtp_common::timeout(Duration::from_secs(20))]
 #[rstest::rstest]
 #[xmtp_common::test]
+async fn test_stream_all_messages_filters_messages_after_attached_consent_becomes_denied() {
+    tester!(sender, with_name: "sender");
+    tester!(receiver, with_name: "receiver");
+
+    let group = sender.create_group(None, None).unwrap();
+    group.add_members(&[receiver.inbox_id()]).await.unwrap();
+
+    sender.sync_welcomes().await.unwrap();
+    receiver.sync_welcomes().await.unwrap();
+    xmtp_common::time::sleep(Duration::from_millis(100)).await;
+
+    group.update_consent_state(ConsentState::Allowed).unwrap();
+
+    let stream = sender
+        .stream_all_messages(None, Some(vec![ConsentState::Allowed]))
+        .await
+        .unwrap();
+    futures::pin_mut!(stream);
+
+    let receiver_group = receiver.group(&group.group_id).unwrap();
+    receiver_group
+        .send_message(b"msg while allowed", SendMessageOpts::default())
+        .await
+        .unwrap();
+    assert_msg!(stream, "msg while allowed");
+
+    group.update_consent_state(ConsentState::Denied).unwrap();
+    xmtp_common::time::sleep(Duration::from_millis(100)).await;
+
+    receiver_group
+        .send_message(b"msg after denied", SendMessageOpts::default())
+        .await
+        .unwrap();
+
+    let denied_result = xmtp_common::time::timeout(Duration::from_secs(2), stream.next()).await;
+    assert!(
+        denied_result.is_err(),
+        "Should not receive messages once an attached conversation becomes denied"
+    );
+
+    group.update_consent_state(ConsentState::Allowed).unwrap();
+    xmtp_common::time::sleep(Duration::from_millis(100)).await;
+
+    receiver_group
+        .send_message(b"msg after re-allowed", SendMessageOpts::default())
+        .await
+        .unwrap();
+
+    assert_msg!(stream, "msg after re-allowed");
+}
+
+#[xmtp_common::timeout(Duration::from_secs(20))]
+#[rstest::rstest]
+#[xmtp_common::test]
+async fn test_stream_all_messages_reacts_to_allowed_consent_transition() {
+    tester!(sender, with_name: "sender");
+    tester!(receiver, with_name: "receiver");
+
+    let group = sender.create_group(None, None).unwrap();
+    group.add_members(&[receiver.inbox_id()]).await.unwrap();
+
+    sender.sync_welcomes().await.unwrap();
+    receiver.sync_welcomes().await.unwrap();
+    xmtp_common::time::sleep(Duration::from_millis(100)).await;
+
+    group.update_consent_state(ConsentState::Denied).unwrap();
+
+    let stream = sender
+        .stream_all_messages(None, Some(vec![ConsentState::Allowed]))
+        .await
+        .unwrap();
+    futures::pin_mut!(stream);
+
+    let receiver_group = receiver.group(&group.group_id).unwrap();
+    receiver_group
+        .send_message(b"msg while denied", SendMessageOpts::default())
+        .await
+        .unwrap();
+
+    let denied_result = xmtp_common::time::timeout(Duration::from_secs(2), stream.next()).await;
+    assert!(
+        denied_result.is_err(),
+        "Should not receive messages while the conversation remains denied"
+    );
+
+    group.update_consent_state(ConsentState::Allowed).unwrap();
+    xmtp_common::time::sleep(Duration::from_millis(100)).await;
+
+    receiver_group
+        .send_message(b"msg after allowed", SendMessageOpts::default())
+        .await
+        .unwrap();
+
+    assert_msg!(stream, "msg after allowed");
+}
+
+#[xmtp_common::timeout(Duration::from_secs(20))]
+#[rstest::rstest]
+#[xmtp_common::test]
+async fn test_stream_all_messages_reacts_to_allowed_consent_transition_without_denied_backlog() {
+    tester!(sender, with_name: "sender");
+    tester!(receiver, with_name: "receiver");
+
+    let group = sender.create_group(None, None).unwrap();
+    group.add_members(&[receiver.inbox_id()]).await.unwrap();
+
+    sender.sync_welcomes().await.unwrap();
+    receiver.sync_welcomes().await.unwrap();
+    xmtp_common::time::sleep(Duration::from_millis(100)).await;
+
+    group.update_consent_state(ConsentState::Denied).unwrap();
+
+    let stream = sender
+        .stream_all_messages(None, Some(vec![ConsentState::Allowed]))
+        .await
+        .unwrap();
+    futures::pin_mut!(stream);
+
+    let denied_result = xmtp_common::time::timeout(Duration::from_secs(2), stream.next()).await;
+    assert!(
+        denied_result.is_err(),
+        "Should not receive messages while the conversation remains denied"
+    );
+
+    group.update_consent_state(ConsentState::Allowed).unwrap();
+    xmtp_common::time::sleep(Duration::from_millis(100)).await;
+
+    let receiver_group = receiver.group(&group.group_id).unwrap();
+    receiver_group
+        .send_message(
+            b"msg after allowed without denied backlog",
+            SendMessageOpts::default(),
+        )
+        .await
+        .unwrap();
+
+    assert_msg!(stream, "msg after allowed without denied backlog");
+}
+
+#[xmtp_common::timeout(Duration::from_secs(20))]
+#[rstest::rstest]
+#[xmtp_common::test]
 async fn test_stream_all_messages_filters_new_group_when_dm_only() {
     let sender = ClientBuilder::new_test_client(&generate_local_wallet()).await;
     let receiver_wallet = generate_local_wallet();

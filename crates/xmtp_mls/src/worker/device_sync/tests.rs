@@ -1,7 +1,10 @@
 use super::*;
 use super::{ArchiveOptions, BackupElementSelection};
+use crate::assert_msg;
 use crate::groups::send_message_opts::SendMessageOpts;
 use crate::tester;
+use futures::StreamExt;
+use std::time::Duration;
 use xmtp_configuration::DeviceSyncUrls;
 use xmtp_db::{
     consent_record::ConsentState,
@@ -288,15 +291,85 @@ async fn test_hmac_and_consent_preference_sync() {
     assert_eq!(alix1_group.consent_state()?, ConsentState::Unknown);
     alix1_group.update_consent_state(ConsentState::Allowed)?;
 
+    // DM consent sync can emit multiple stored records for one logical update. Reset the
+    // receiver-side metric so we wait on the new group-consent delivery, not prior DM traffic.
+    alix2.worker().clear_metric(SyncMetric::ConsentReceived);
     alix2.sync_all_welcomes_and_groups(None).await?;
 
     alix2
         .worker()
-        .register_interest(SyncMetric::ConsentReceived, 2)
+        .register_interest(SyncMetric::ConsentReceived, 1)
         .wait()
         .await?;
     let alix2_group = alix2.group(&bo_group.group_id)?;
     assert_eq!(alix2_group.consent_state()?, ConsentState::Allowed);
+}
+
+#[xmtp_common::timeout(Duration::from_secs(30))]
+#[rstest::rstest]
+#[xmtp_common::test(unwrap_try = true)]
+#[cfg_attr(target_arch = "wasm32", ignore)]
+async fn test_stream_all_messages_reacts_to_device_sync_allowed_consent_transition() {
+    tester!(alix1, sync_worker);
+    tester!(bo);
+
+    let dm = alix1.find_or_create_dm(bo.inbox_id(), None).await?;
+    tester!(alix2, from: alix1);
+
+    alix1.test_has_same_sync_group_as(&alix2).await?;
+
+    let stream = alix2
+        .stream_all_messages(None, Some(vec![ConsentState::Allowed]))
+        .await?;
+    futures::pin_mut!(stream);
+
+    let bo_dm = bo.find_or_create_dm(alix1.inbox_id(), None).await?;
+
+    alix1.worker().clear_metric(SyncMetric::ConsentSent);
+    dm.update_consent_state(ConsentState::Denied)?;
+    alix1
+        .worker()
+        .register_interest(SyncMetric::ConsentSent, 1)
+        .wait()
+        .await?;
+
+    alix2.sync_all_device_sync_groups().await?;
+    alix2
+        .worker()
+        .register_interest(SyncMetric::ConsentReceived, 1)
+        .wait()
+        .await?;
+
+    bo_dm
+        .send_message(b"msg while denied", SendMessageOpts::default())
+        .await?;
+
+    let denied_result = xmtp_common::time::timeout(Duration::from_secs(2), stream.next()).await;
+    assert!(
+        denied_result.is_err(),
+        "device-sync delivered denied consent should keep the conversation filtered out"
+    );
+
+    alix1.worker().clear_metric(SyncMetric::ConsentSent);
+    dm.update_consent_state(ConsentState::Allowed)?;
+    alix1
+        .worker()
+        .register_interest(SyncMetric::ConsentSent, 1)
+        .wait()
+        .await?;
+
+    alix2.sync_all_device_sync_groups().await?;
+    alix2
+        .worker()
+        .register_interest(SyncMetric::ConsentReceived, 1)
+        .wait()
+        .await?;
+
+    bo_dm
+        .send_message(b"msg after allowed", SendMessageOpts::default())
+        .await?;
+
+    assert_msg!(stream, "msg after allowed");
 }
 
 #[rstest::rstest]
