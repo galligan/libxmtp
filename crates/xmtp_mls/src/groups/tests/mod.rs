@@ -3706,6 +3706,64 @@ async fn external_group_update_sync_is_idempotent() {
     );
 }
 
+#[xmtp_common::test]
+async fn external_application_sync_is_idempotent() {
+    tester!(alix);
+    tester!(bo);
+
+    let alix_group = alix.create_group(None, None).unwrap();
+    alix_group.add_members(&[bo.inbox_id()]).await.unwrap();
+
+    bo.sync_welcomes().await.unwrap();
+    let bo_groups = bo.find_groups(GroupQueryArgs::default()).unwrap();
+    let bo_group = bo_groups.first().unwrap();
+    bo_group.sync().await.unwrap();
+
+    let application_messages = || {
+        bo_group
+            .find_messages(&MsgQueryArgs {
+                kind: Some(GroupMessageKind::Application),
+                ..Default::default()
+            })
+            .unwrap()
+    };
+
+    assert!(application_messages().is_empty());
+
+    alix_group
+        .send_message(b"external app replay check", SendMessageOpts::default())
+        .await
+        .unwrap();
+
+    bo_group.sync().await.unwrap();
+
+    let messages_after_first_sync = application_messages();
+    let message_ids_after_first_sync = messages_after_first_sync
+        .iter()
+        .map(|message| message.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(messages_after_first_sync.len(), 1);
+    assert_eq!(
+        messages_after_first_sync[0].decrypted_message_bytes,
+        b"external app replay check"
+    );
+
+    bo_group.sync().await.unwrap();
+
+    let messages_after_second_sync = application_messages();
+    assert_eq!(
+        messages_after_second_sync
+            .iter()
+            .map(|message| message.id.clone())
+            .collect::<Vec<_>>(),
+        message_ids_after_first_sync
+    );
+    assert_eq!(
+        messages_after_second_sync[0].decrypted_message_bytes,
+        b"external app replay check"
+    );
+}
+
 #[xmtp_common::test(flavor = "multi_thread")]
 async fn test_parallel_syncs() {
     tester!(alix1, sync_worker);
