@@ -1,11 +1,6 @@
-use super::{
-    ArchiveOptions, BackupElementSelection, DeviceSyncClient, DeviceSyncError,
-    preference_sync::PreferenceUpdate,
-};
+use super::{DeviceSyncClient, DeviceSyncError, preference_sync::PreferenceUpdate};
 use crate::{
-    client::ClientError,
     context::XmtpSharedContext,
-    groups::GroupError,
     subscriptions::SyncWorkerEvent,
     worker::{
         BoxedWorker, DynMetrics, MetricsCasting, Worker, WorkerFactory, WorkerKind, WorkerResult,
@@ -16,17 +11,9 @@ use futures::TryFutureExt;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{OnceCell, broadcast};
 use tracing::instrument;
-use xmtp_archive::exporter::ArchiveExporter;
 use xmtp_common::Event;
 use xmtp_db::prelude::*;
 use xmtp_macro::log_event;
-use xmtp_proto::xmtp::device_sync::content::{
-    DeviceSyncKeyType, DeviceSyncReply as DeviceSyncReplyProto,
-    DeviceSyncRequest as DeviceSyncRequestProto, device_sync_content::Content as ContentProto,
-    device_sync_key_type::Key,
-};
-
-const ENC_KEY_SIZE: usize = xmtp_archive::ENC_KEY_SIZE;
 
 pub struct SyncWorker<Context> {
     client: DeviceSyncClient<Context>,
@@ -238,138 +225,6 @@ where
 
     async fn evt_cycle_hmac(&self) -> Result<(), DeviceSyncError> {
         self.client.cycle_hmac().await?;
-        Ok(())
-    }
-}
-
-impl<Context> DeviceSyncClient<Context>
-where
-    Context: XmtpSharedContext,
-{
-    pub(crate) async fn send_archive(
-        &self,
-        options: &ArchiveOptions,
-        sync_group_id: &Vec<u8>,
-        pin: &str,
-        server_url: &str,
-    ) -> Result<(), DeviceSyncError>
-    where
-        Context::Db: 'static,
-    {
-        log_event!(
-            Event::DeviceSyncArchiveUploadStart,
-            self.context.installation_id(),
-            group_id = sync_group_id,
-            server_url
-        );
-
-        // Generate a random encryption key
-        let key = xmtp_common::rand_vec::<ENC_KEY_SIZE>();
-
-        tracing::info!("Building the exporter.");
-        // Now we want to create an encrypted stream from our database to the history server.
-        //
-        // 1. Build the exporter
-        let db = self.context.db();
-        let exporter = ArchiveExporter::new(options.clone(), db, &key);
-        let metadata = exporter.metadata().clone();
-
-        tracing::info!("Uploading the archive.");
-        // 5. Make the request
-        let url = format!("{server_url}/upload");
-        let response = exporter.post_to_url(&url).await?;
-
-        // Build a sync reply message that the new installation will consume
-        let reply = DeviceSyncReplyProto {
-            encryption_key: Some(DeviceSyncKeyType {
-                key: Some(Key::Aes256Gcm(key)),
-            }),
-            request_id: pin.to_string(),
-            url: format!("{server_url}/files/{response}",),
-            metadata: Some(metadata),
-
-            // Deprecated fields
-            ..Default::default()
-        };
-
-        tracing::info!("Sending sync request reply message.");
-        // Send the message out over the network
-        self.send_device_sync_message(ContentProto::Reply(reply))
-            .await?;
-
-        // Update metrics.
-        if options.elements.contains(&BackupElementSelection::Consent) {
-            self.metrics
-                .increment_metric(SyncMetric::ConsentPayloadSent);
-        }
-        if options.elements.contains(&BackupElementSelection::Messages) {
-            self.metrics
-                .increment_metric(SyncMetric::MessagesPayloadSent);
-        }
-        self.metrics.increment_metric(SyncMetric::PayloadSent);
-
-        log_event!(
-            Event::DeviceSyncArchiveUploadComplete,
-            self.context.installation_id(),
-            group_id = sync_group_id,
-        );
-
-        Ok(())
-    }
-
-    pub async fn send_sync_request(
-        &self,
-        options: ArchiveOptions,
-        server_url: impl ToString,
-    ) -> Result<(), ClientError> {
-        let sync_group = self.get_sync_group().await?;
-        sync_group
-            .sync_with_conn()
-            .await
-            .map_err(GroupError::from)?;
-
-        let request = DeviceSyncRequestProto {
-            pin: xmtp_common::rand_string::<5>(),
-            options: Some(options.into()),
-            server_url: server_url.to_string(),
-
-            // Deprecated fields
-            #[allow(deprecated)]
-            deprecated_kind: 0,
-        };
-
-        self.send_device_sync_message(ContentProto::Request(request))
-            .await?;
-
-        self.metrics.increment_metric(SyncMetric::RequestSent);
-        log_event!(
-            Event::DeviceSyncSentSyncRequest,
-            self.context.installation_id(),
-            group_id = sync_group.group_id
-        );
-
-        Ok(())
-    }
-
-    pub async fn send_sync_archive(
-        &self,
-        options: &ArchiveOptions,
-        server_url: &str,
-        pin: &str,
-    ) -> Result<(), ClientError>
-    where
-        Context::Db: 'static,
-    {
-        let sync_group = self.get_sync_group().await?;
-        sync_group
-            .sync_with_conn()
-            .await
-            .map_err(GroupError::from)?;
-
-        self.send_archive(options, &sync_group.group_id, pin, server_url)
-            .await
-            .map_err(|e| GroupError::DeviceSync(Box::new(e)))?;
-
         Ok(())
     }
 }

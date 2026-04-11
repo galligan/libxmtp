@@ -46,6 +46,7 @@ pub mod archive;
 pub(crate) mod archive_receive;
 pub(crate) mod catalog;
 pub(crate) mod inbound;
+pub(crate) mod outbound;
 pub mod preference_sync;
 pub mod worker;
 
