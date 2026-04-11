@@ -12,7 +12,9 @@ pub mod group_membership;
 pub mod group_permissions;
 pub mod intents;
 pub mod members;
+mod message_fields;
 pub mod message_list;
+mod message_ops;
 pub(super) mod mls_ext;
 pub(super) mod mls_sync;
 pub mod oneshot;
@@ -25,6 +27,7 @@ pub mod validated_commit;
 pub mod welcome_pointer;
 pub mod welcome_sync;
 mod welcomes;
+pub(crate) use message_fields::QueryableContentFields;
 pub use welcomes::*;
 
 pub use self::group_permissions::PreconfiguredPolicies;
@@ -42,16 +45,15 @@ use crate::groups::{
     mls_ext::CommitLogStorer,
     validated_commit::LibXMTPVersion,
 };
-use crate::messages::enrichment::EnrichMessageError;
 use crate::subscriptions::SyncWorkerEvent;
 use crate::{GroupCommitLock, context::XmtpSharedContext};
-use crate::{client::ClientError, subscriptions::LocalEvents, utils::id::calculate_message_id};
+use crate::{client::ClientError, subscriptions::LocalEvents};
 use crate::{
     groups::send_message_opts::SendMessageOpts,
     worker::device_sync::preference_sync::PreferenceUpdate,
 };
 pub use error::*;
-use intents::{SendMessageIntentData, UpdateGroupMembershipResult};
+use intents::UpdateGroupMembershipResult;
 use openmls::{
     credentials::CredentialType,
     extensions::{
@@ -62,7 +64,6 @@ use openmls::{
     messages::proposals::ProposalType,
     prelude::{Capabilities, GroupId, MlsGroup as OpenMlsGroup, WireFormatPolicy},
 };
-use prost::Message;
 use std::collections::HashMap;
 use std::{collections::HashSet, sync::Arc};
 use tokio::sync::Mutex;
@@ -70,28 +71,18 @@ use xmtp_common::{Event, log_event, time::now_ns};
 use xmtp_configuration::{
     BROADCAST_PROPOSAL_SUPPORT, CIPHERSUITE, GROUP_MEMBERSHIP_EXTENSION_ID,
     GROUP_PERMISSIONS_EXTENSION_ID, MAX_GROUP_SIZE, MAX_PAST_EPOCHS, MUTABLE_METADATA_EXTENSION_ID,
-    Originators, PROPOSAL_SUPPORT_EXTENSION_ID, SEND_MESSAGE_UPDATE_INSTALLATIONS_INTERVAL_NS,
-    WELCOME_POINTEE_ENCRYPTION_AEAD_TYPES_EXTENSION_ID, WELCOME_WRAPPER_ENCRYPTION_EXTENSION_ID,
+    Originators, PROPOSAL_SUPPORT_EXTENSION_ID, WELCOME_POINTEE_ENCRYPTION_AEAD_TYPES_EXTENSION_ID,
+    WELCOME_WRAPPER_ENCRYPTION_EXTENSION_ID,
 };
-use xmtp_content_types::delete_message::DeleteMessageCodec;
 use xmtp_content_types::leave_request::LeaveRequestCodec;
 use xmtp_content_types::{ContentCodec, encoded_content_to_bytes};
-use xmtp_content_types::{
-    reaction::{LegacyReaction, ReactionCodec},
-    reply::ReplyCodec,
-};
 use xmtp_cryptography::configuration::ED25519_KEY_LENGTH;
-use xmtp_db::group_message::Deletable;
-use xmtp_db::message_deletion::{QueryMessageDeletion, StoredMessageDeletion};
+use xmtp_db::local_commit_log::LocalCommitLog;
 use xmtp_db::pending_remove::QueryPendingRemove;
 use xmtp_db::prelude::*;
 use xmtp_db::user_preferences::HmacKey;
 use xmtp_db::{Fetch, consent_record::ConsentType};
-use xmtp_db::{
-    NotFound, StorageError,
-    group_message::{ContentType, StoredGroupMessageWithReactions},
-    refresh_state::EntityKind,
-};
+use xmtp_db::{NotFound, StorageError, refresh_state::EntityKind};
 use xmtp_db::{Store, StoreOrIgnore};
 use xmtp_db::{
     XmtpMlsStorageProvider,
@@ -100,9 +91,8 @@ use xmtp_db::{
 use xmtp_db::{
     consent_record::{ConsentState, StoredConsentRecord},
     group::{ConversationType, GroupMembershipState, StoredGroup},
-    group_message::{DeliveryStatus, GroupMessageKind, MsgQueryArgs, StoredGroupMessage},
+    group_message::{DeliveryStatus, StoredGroupMessage},
 };
-use xmtp_db::{group_message::LatestMessageTimeBySender, local_commit_log::LocalCommitLog};
 use xmtp_id::associations::Identifier;
 use xmtp_id::{AsIdRef, InboxId, InboxIdRef};
 use xmtp_mls_common::{
@@ -112,15 +102,8 @@ use xmtp_mls_common::{
         GroupMutableMetadata, GroupMutableMetadataError, MessageDisappearingSettings, MetadataField,
     },
 };
-use xmtp_proto::xmtp::mls::message_contents::content_types::{DeleteMessage, LeaveRequest};
-use xmtp_proto::{
-    types::Cursor,
-    xmtp::mls::message_contents::{
-        EncodedContent, OneshotMessage, PlaintextEnvelope,
-        content_types::ReactionV2,
-        plaintext_envelope::{Content, V1},
-    },
-};
+use xmtp_proto::xmtp::mls::message_contents::content_types::LeaveRequest;
+use xmtp_proto::{types::Cursor, xmtp::mls::message_contents::OneshotMessage};
 
 const MAX_GROUP_DESCRIPTION_LENGTH: usize = 1000;
 const MAX_GROUP_NAME_LENGTH: usize = 100;
@@ -217,64 +200,6 @@ pub enum UpdateAdminListType {
     Remove,
     AddSuper,
     RemoveSuper,
-}
-
-/// Fields extracted from content of a message that should be stored in the DB
-pub struct QueryableContentFields {
-    pub content_type: ContentType,
-    pub version_major: i32,
-    pub version_minor: i32,
-    pub authority_id: String,
-    pub reference_id: Option<Vec<u8>>,
-}
-
-impl Default for QueryableContentFields {
-    fn default() -> Self {
-        Self {
-            content_type: ContentType::Unknown, // Or whatever the appropriate default is
-            version_major: 0,
-            version_minor: 0,
-            authority_id: String::new(),
-            reference_id: None,
-        }
-    }
-}
-
-impl TryFrom<EncodedContent> for QueryableContentFields {
-    type Error = prost::DecodeError;
-
-    fn try_from(content: EncodedContent) -> Result<Self, Self::Error> {
-        let content_type_id = content.r#type.clone().unwrap_or_default();
-
-        let type_id_str = content_type_id.type_id.clone();
-
-        let reference_id = match (type_id_str.as_str(), content_type_id.version_major) {
-            (ReplyCodec::TYPE_ID, 1) => ReplyCodec::decode(content)
-                .ok()
-                .and_then(|reply| hex::decode(reply.reference).ok()),
-            (ReactionCodec::TYPE_ID, major) if major >= 2 => {
-                ReactionV2::decode(content.content.as_slice())
-                    .ok()
-                    .and_then(|reaction| hex::decode(reaction.reference).ok())
-            }
-            (ReactionCodec::TYPE_ID, _) => LegacyReaction::decode(&content.content)
-                .and_then(|legacy_reaction| hex::decode(legacy_reaction.reference).ok()),
-            (DeleteMessageCodec::TYPE_ID, DeleteMessageCodec::MAJOR_VERSION) => {
-                DeleteMessage::decode(content.content.as_slice())
-                    .ok()
-                    .and_then(|delete_msg| hex::decode(delete_msg.message_id).ok())
-            }
-            _ => None,
-        };
-
-        Ok(QueryableContentFields {
-            content_type: content_type_id.type_id.into(),
-            version_major: content_type_id.version_major as i32,
-            version_minor: content_type_id.version_minor as i32,
-            authority_id: content_type_id.authority_id.to_string(),
-            reference_id,
-        })
-    }
 }
 
 impl<Context: Clone> From<MlsGroup<&Context>> for MlsGroup<Context> {
@@ -782,85 +707,6 @@ where
             .unwrap_or(false) // Default to false if no mutable metadata
     }
 
-    /// Send a message on this users XMTP [`Client`](crate::client::Client).
-    #[cfg_attr(any(test, feature = "test-utils"), tracing::instrument(level = "info", skip_all, fields(who = self.context.inbox_id(), message = %String::from_utf8_lossy(&message[..message.len().min(100)]))))]
-    #[cfg_attr(
-        not(any(test, feature = "test-utils")),
-        tracing::instrument(level = "trace", skip_all)
-    )]
-    pub async fn send_message(
-        &self,
-        message: &[u8],
-        opts: send_message_opts::SendMessageOpts,
-    ) -> Result<Vec<u8>, GroupError> {
-        if !self.is_active()? {
-            tracing::warn!("Unable to send a message on an inactive group.");
-            return Err(GroupError::GroupInactive);
-        }
-
-        self.ensure_not_paused().await?;
-        let update_interval_ns = Some(SEND_MESSAGE_UPDATE_INSTALLATIONS_INTERVAL_NS);
-        self.maybe_update_installations(update_interval_ns).await?;
-
-        // Check for pending proposals and commit them first
-        // OpenMLS blocks message creation when there are pending proposals
-        self.commit_pending_proposals_if_any().await?;
-
-        let message_id =
-            self.prepare_message(message, opts, |now| Self::into_envelope(message, now))?;
-
-        self.sync_until_last_intent_resolved().await?;
-
-        // implicitly set group consent state to allowed
-        self.update_consent_state(ConsentState::Allowed)?;
-
-        Ok(message_id)
-    }
-
-    /// Checks for pending MLS proposals and commits them if any exist.
-    /// OpenMLS blocks message creation when there are pending proposals,
-    /// so we need to commit them first.
-    async fn commit_pending_proposals_if_any(&self) -> Result<(), GroupError> {
-        let has_pending = self
-            .load_mls_group_with_lock_async(async |openmls_group| {
-                Ok::<bool, GroupError>(openmls_group.pending_proposals().next().is_some())
-            })
-            .await?;
-
-        if has_pending {
-            tracing::debug!(
-                inbox_id = self.context.inbox_id(),
-                group_id = hex::encode(&self.group_id),
-                "Found pending proposals, committing before sending message"
-            );
-
-            // Queue a CommitPendingProposals intent and wait for it to resolve
-            let intent = intents::QueueIntent::commit_pending_proposals().queue(self)?;
-            self.sync_until_intent_resolved(intent.id).await?;
-        }
-
-        Ok(())
-    }
-
-    /// Publish all unpublished messages. This happens by calling `sync_until_last_intent_resolved`
-    /// which publishes all pending intents and reads them back from the network.
-    #[cfg_attr(any(test, feature = "test-utils"), tracing::instrument(level = "info", fields(who = self.context.inbox_id()), skip(self)))]
-    #[cfg_attr(
-        not(any(test, feature = "test-utils")),
-        tracing::instrument(level = "trace", skip(self))
-    )]
-    pub async fn publish_messages(&self) -> Result<(), GroupError> {
-        self.ensure_not_paused().await?;
-        let update_interval_ns = Some(SEND_MESSAGE_UPDATE_INSTALLATIONS_INTERVAL_NS);
-        self.maybe_update_installations(update_interval_ns).await?;
-        self.sync_until_last_intent_resolved().await?;
-
-        // implicitly set group consent state to allowed
-        self.update_consent_state(ConsentState::Allowed)?;
-
-        Ok(())
-    }
-
     /// Checks the network to see if any group members have identity updates that would cause installations
     /// to be added or removed from the group.
     ///
@@ -869,305 +715,6 @@ where
         self.ensure_not_paused().await?;
         self.maybe_update_installations(Some(0)).await?;
         Ok(())
-    }
-
-    /// Send a message, optimistically returning the ID of the message before the result of a message publish.
-    pub fn send_message_optimistic(
-        &self,
-        message: &[u8],
-        opts: send_message_opts::SendMessageOpts,
-    ) -> Result<Vec<u8>, GroupError> {
-        let message_id =
-            self.prepare_message(message, opts, |now| Self::into_envelope(message, now))?;
-        Ok(message_id)
-    }
-
-    /// Prepare a message for later publishing.
-    ///
-    /// Stores the message locally with `Unpublished` delivery status but does NOT
-    /// create an intent to publish. Use `publish_stored_message` to publish later.
-    ///
-    /// # Arguments
-    /// * `message` - The message content bytes
-    /// * `should_push` - Whether to send a push notification when publishing
-    ///
-    /// Returns the message ID.
-    pub fn prepare_message_for_later_publish(
-        &self,
-        message: &[u8],
-        should_push: bool,
-    ) -> Result<Vec<u8>, GroupError> {
-        let now = now_ns();
-        let queryable_content_fields = Self::extract_queryable_content_fields(message);
-
-        let message_id = calculate_message_id(&self.group_id, message, &now.to_string());
-        let group_message = StoredGroupMessage {
-            id: message_id.clone(),
-            group_id: self.group_id.clone(),
-            decrypted_message_bytes: message.to_vec(),
-            sent_at_ns: now,
-            kind: GroupMessageKind::Application,
-            sender_installation_id: self.context.installation_id().into(),
-            sender_inbox_id: self.context.inbox_id().to_string(),
-            delivery_status: DeliveryStatus::Unpublished,
-            content_type: queryable_content_fields.content_type,
-            version_major: queryable_content_fields.version_major,
-            version_minor: queryable_content_fields.version_minor,
-            authority_id: queryable_content_fields.authority_id,
-            reference_id: queryable_content_fields.reference_id,
-            sequence_id: 0,
-            originator_id: 0,
-            expire_at_ns: None,
-            inserted_at_ns: 0,
-            should_push,
-        };
-        group_message.store(&self.context.db())?;
-
-        Ok(message_id)
-    }
-
-    /// Publish a previously stored message by ID.
-    ///
-    /// Creates an intent for the message and publishes it to the network.
-    /// Uses the `should_push` value that was stored with the message.
-    /// This is a no-op if the message is already published.
-    ///
-    /// Returns an error if the message is not found.
-    #[cfg_attr(
-        not(any(test, feature = "test-utils")),
-        tracing::instrument(level = "trace", skip(self))
-    )]
-    pub async fn publish_stored_message(&self, message_id: &[u8]) -> Result<(), GroupError> {
-        if !self.is_active()? {
-            return Err(GroupError::GroupInactive);
-        }
-        self.ensure_not_paused().await?;
-
-        // Fetch the message
-        let message = self
-            .context
-            .db()
-            .get_group_message(message_id)?
-            .ok_or_else(|| GroupError::NotFound(NotFound::MessageById(message_id.to_vec())))?;
-
-        // Silent no-op if already published
-        if message.delivery_status == DeliveryStatus::Published {
-            return Ok(());
-        }
-
-        // Create envelope from stored message
-        let plain_envelope =
-            Self::into_envelope(&message.decrypted_message_bytes, message.sent_at_ns);
-        let mut encoded_envelope = vec![];
-        plain_envelope.encode(&mut encoded_envelope)?;
-
-        // Queue the intent (use should_push from stored message)
-        let intent_data: Vec<u8> = SendMessageIntentData::new(encoded_envelope).into();
-        QueueIntent::send_message()
-            .data(intent_data)
-            .should_push(message.should_push)
-            .queue(self)?;
-
-        // Publish
-        self.maybe_update_installations(Some(SEND_MESSAGE_UPDATE_INSTALLATIONS_INTERVAL_NS))
-            .await?;
-        self.sync_until_last_intent_resolved().await?;
-
-        // Implicitly set group consent state to allowed
-        self.update_consent_state(ConsentState::Allowed)?;
-
-        Ok(())
-    }
-
-    /// Delete a message by its ID. Returns the ID of the deletion message.
-    ///
-    /// Only the original sender or a super admin can delete a message.
-    ///
-    /// # Wire Protocol
-    /// The `DeleteMessage` protobuf encodes `message_id` as a hex-encoded string for wire
-    /// transmission, while the database stores message IDs as raw bytes. This function handles
-    /// the conversion: it accepts raw bytes, hex-encodes them for the wire protocol, and when
-    /// processing incoming deletions (in `process_delete_message`), the hex string is decoded
-    /// back to bytes for database lookups.
-    ///
-    /// # Arguments
-    /// * `message_id` - The message ID as bytes
-    ///
-    /// # Returns
-    /// The ID of the deletion message
-    pub fn delete_message(&self, message_id: Vec<u8>) -> Result<Vec<u8>, GroupError> {
-        use error::DeleteMessageError;
-
-        let conn = self.context.db();
-
-        // Load the original message
-        let original_msg = conn
-            .get_group_message(&message_id)?
-            .ok_or_else(|| DeleteMessageError::MessageNotFound(hex::encode(&message_id)))?;
-
-        // Validate message belongs to this group (prevent cross-group deletion)
-        if original_msg.group_id != self.group_id {
-            return Err(DeleteMessageError::NotAuthorized.into());
-        }
-
-        // Check if message is already deleted
-        if conn.is_message_deleted(&message_id)? {
-            return Err(DeleteMessageError::MessageAlreadyDeleted.into());
-        }
-
-        let sender_inbox_id = self.context.inbox_id();
-        let is_sender = original_msg.sender_inbox_id == sender_inbox_id;
-        let is_super_admin = self.is_super_admin(sender_inbox_id.to_string())?;
-
-        if !is_sender && !is_super_admin {
-            return Err(DeleteMessageError::NotAuthorized.into());
-        }
-
-        if !original_msg.kind.is_deletable() || !original_msg.content_type.is_deletable() {
-            return Err(DeleteMessageError::NonDeletableMessage.into());
-        }
-
-        let delete_msg = DeleteMessage {
-            message_id: hex::encode(&message_id),
-        };
-
-        let encoded_delete = DeleteMessageCodec::encode(delete_msg)?;
-        let mut buf = Vec::new();
-        encoded_delete.encode(&mut buf)?;
-
-        let deletion_message_id = self.send_message_optimistic(&buf, SendMessageOpts::default())?;
-
-        let is_super_admin_deletion = !is_sender && is_super_admin;
-
-        let deletion = StoredMessageDeletion {
-            id: deletion_message_id.clone(),
-            group_id: self.group_id.clone(),
-            deleted_message_id: message_id,
-            deleted_by_inbox_id: sender_inbox_id.to_string(),
-            is_super_admin_deletion,
-            deleted_at_ns: now_ns(),
-        };
-
-        deletion.store(&conn)?;
-
-        Ok(deletion_message_id)
-    }
-
-    /// Helper function to extract queryable content fields from a message
-    fn extract_queryable_content_fields(message: &[u8]) -> QueryableContentFields {
-        // Return early with default if decoding fails or type is missing
-        EncodedContent::decode(message)
-            .inspect_err(|_| {
-                tracing::debug!("No queryable content fields, msg not formatted as encoded content")
-            })
-            .and_then(|content| {
-                QueryableContentFields::try_from(content).inspect_err(|e| {
-                    tracing::debug!(
-                        "Failed to convert EncodedContent to QueryableContentFields: {}",
-                        e
-                    )
-                })
-            })
-            .unwrap_or_default()
-    }
-
-    /// Prepare a [`IntentKind::SendMessage`] intent, and [`StoredGroupMessage`] on this users XMTP [`Client`].
-    ///
-    /// # Arguments
-    /// * message: UTF-8 or encoded message bytes
-    /// * opts: Options for sending the message
-    /// * envelope: closure that returns context-specific [`PlaintextEnvelope`]. Closure accepts
-    ///   timestamp attached to intent & stored message.
-    #[tracing::instrument(skip_all, level = "trace")]
-    pub(crate) fn prepare_message<F>(
-        &self,
-        message: &[u8],
-        opts: send_message_opts::SendMessageOpts,
-        envelope: F,
-    ) -> Result<Vec<u8>, GroupError>
-    where
-        F: FnOnce(i64) -> PlaintextEnvelope,
-    {
-        // Store the message locally first (with should_push preference)
-        let message_id = self.prepare_message_for_later_publish(message, opts.should_push)?;
-
-        // Fetch the stored message to get the sent_at_ns timestamp
-        let stored_message = self
-            .context
-            .db()
-            .get_group_message(&message_id)?
-            .ok_or_else(|| GroupError::NotFound(NotFound::MessageById(message_id.clone())))?;
-
-        // Create envelope using the stored timestamp for consistency
-        let plain_envelope = envelope(stored_message.sent_at_ns);
-        let mut encoded_envelope = vec![];
-        plain_envelope.encode(&mut encoded_envelope)?;
-
-        // Queue the intent (use should_push from stored message)
-        let intent_data: Vec<u8> = SendMessageIntentData::new(encoded_envelope).into();
-        QueueIntent::send_message()
-            .data(intent_data)
-            .should_push(stored_message.should_push)
-            .queue(self)?;
-
-        Ok(message_id)
-    }
-
-    fn into_envelope(encoded_msg: &[u8], idempotency_key: i64) -> PlaintextEnvelope {
-        PlaintextEnvelope {
-            content: Some(Content::V1(V1 {
-                content: encoded_msg.to_vec(),
-                idempotency_key: idempotency_key.to_string(),
-            })),
-        }
-    }
-
-    /// Query the database for stored messages. Optionally filtered by time, kind, delivery_status
-    /// and limit
-    pub fn find_messages(
-        &self,
-        args: &MsgQueryArgs,
-    ) -> Result<Vec<StoredGroupMessage>, GroupError> {
-        let conn = self.context.db();
-        let messages = conn.get_group_messages(&self.group_id, args)?;
-        Ok(messages)
-    }
-
-    /// Count the number of stored messages matching the given criteria
-    pub fn count_messages(&self, args: &MsgQueryArgs) -> Result<i64, GroupError> {
-        let conn = self.context.db();
-        let count = conn.count_group_messages(&self.group_id, args)?;
-        Ok(count)
-    }
-
-    /// Query the database for stored messages. Optionally filtered by time, kind, delivery_status
-    /// and limit
-    pub fn find_messages_with_reactions(
-        &self,
-        args: &MsgQueryArgs,
-    ) -> Result<Vec<StoredGroupMessageWithReactions>, GroupError> {
-        let conn = self.context.db();
-        let messages = conn.get_group_messages_with_reactions(&self.group_id, args)?;
-        Ok(messages)
-    }
-
-    /// Query for enriched messages (with reactions, replies, and deletion status)
-    pub fn find_enriched_messages(
-        &self,
-        args: &MsgQueryArgs,
-    ) -> Result<Vec<crate::messages::decoded_message::DecodedMessage>, EnrichMessageError> {
-        let conn = self.context.db();
-        let messages = conn.get_group_messages(&self.group_id, args)?;
-        let enriched =
-            crate::messages::enrichment::enrich_messages(conn, &self.group_id, messages)?;
-        Ok(enriched)
-    }
-
-    pub fn get_last_read_times(&self) -> Result<LatestMessageTimeBySender, GroupError> {
-        let conn = self.context.db();
-        let latest_read_receipt =
-            conn.get_latest_message_times_by_sender(&self.group_id, &[ContentType::ReadReceipt])?;
-        Ok(latest_read_receipt)
     }
 
     /// Load the group reference stored in the local database
