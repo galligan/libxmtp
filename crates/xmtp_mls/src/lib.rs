@@ -24,7 +24,7 @@ pub use cursor_store::SqliteCursorStore;
 pub use definitions::*;
 pub use groups::{
     ConversationDebugInfo, MlsGroup, PreconfiguredPolicies, UpdateAdminListType,
-    welcome_sync::GroupSyncSummary,
+    send_message_opts::SendMessageOpts, welcome_sync::GroupSyncSummary,
 };
 pub use identity::IdentityStrategy;
 pub use identity_updates::{

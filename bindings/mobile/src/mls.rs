@@ -67,8 +67,9 @@ use xmtp_mls::mls_common::group_mutable_metadata::MessageDisappearingSettings;
 use xmtp_mls::mls_common::group_mutable_metadata::MetadataField;
 use xmtp_mls::{
     Client as MlsClient, ConversationDebugInfo, GroupSyncSummary as XmtpGroupSyncSummary,
-    IdentityStrategy, MlsGroup, PreconfiguredPolicies, SqliteCursorStore, UpdateAdminListType,
-    XmtpSharedContext, apply_signature_request_with_verifier, get_creation_signature_kind,
+    IdentityStrategy, MlsGroup, PreconfiguredPolicies, SendMessageOpts as XmtpSendMessageOpts,
+    SqliteCursorStore, UpdateAdminListType, XmtpSharedContext,
+    apply_signature_request_with_verifier, get_creation_signature_kind,
     inbox_addresses_with_verifier, revoke_installations_with_verifier,
 };
 use xmtp_mls::{
@@ -1224,9 +1225,9 @@ pub struct FfiSendMessageOpts {
     pub should_push: bool,
 }
 
-impl From<FfiSendMessageOpts> for xmtp_mls::groups::send_message_opts::SendMessageOpts {
+impl From<FfiSendMessageOpts> for XmtpSendMessageOpts {
     fn from(opts: FfiSendMessageOpts) -> Self {
-        xmtp_mls::groups::send_message_opts::SendMessageOpts {
+        XmtpSendMessageOpts {
             should_push: opts.should_push,
         }
     }
@@ -1517,10 +1518,10 @@ impl FfiConversations {
 
         let group_permissions = match opts.permissions {
             Some(FfiGroupPermissionsOptions::Default) => {
-                Some(xmtp_mls::groups::PreconfiguredPolicies::Default.to_policy_set())
+                Some(PreconfiguredPolicies::Default.to_policy_set())
             }
             Some(FfiGroupPermissionsOptions::AdminOnly) => {
-                Some(xmtp_mls::groups::PreconfiguredPolicies::AdminsOnly.to_policy_set())
+                Some(PreconfiguredPolicies::AdminsOnly.to_policy_set())
             }
             Some(FfiGroupPermissionsOptions::CustomPolicy) => {
                 if let Some(policy_set) = opts.custom_permission_policy_set {
