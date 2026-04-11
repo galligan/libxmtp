@@ -1,13 +1,11 @@
 use futures::{FutureExt, Stream, StreamExt, TryStreamExt, future, stream as future_stream};
 use process_welcome::ProcessWelcomeFuture;
 use std::{collections::HashSet, sync::Arc};
-use tokio::sync::{broadcast, oneshot};
-use tokio_stream::wrappers::BroadcastStream;
+use tokio::sync::oneshot;
 use xmtp_api_d14n::protocol::{EnvelopeError, V3WelcomeMessageExtractor, WelcomeMessageExtractor};
 use xmtp_api_d14n::stream;
 use xmtp_proto::types::WelcomeMessage;
 
-use tracing::instrument;
 use xmtp_db::prelude::*;
 use xmtp_proto::api_client::XmtpMlsStreams;
 
@@ -16,6 +14,7 @@ use stream_all::StreamAllMessages;
 use stream_conversations::{StreamConversations, WelcomeOrGroup};
 
 pub(crate) mod d14n_compat;
+mod events;
 pub mod process_message;
 pub mod process_welcome;
 mod stream_all;
@@ -25,15 +24,15 @@ pub mod stream_messages;
 #[cfg(any(test, feature = "test-utils"))]
 use crate::subscriptions::stream_messages::stream_stats::{StreamStatsWrapper, StreamWithStats};
 
-use crate::worker::device_sync::preference_sync::PreferenceUpdate;
 use crate::{
     Client,
     context::XmtpSharedContext,
     groups::{GroupError, MlsGroup, mls_sync::GroupMessageProcessingError},
     messages::decoded_message::DecodedMessage,
     subscriptions::d14n_compat::{V3OrD14n, decode_welcome_message},
+    worker::device_sync::preference_sync::PreferenceUpdate,
 };
-use thiserror::Error;
+pub(crate) use events::{LocalEventError, LocalEvents, StreamMessages, SyncWorkerEvent};
 use xmtp_common::{ErrorCode, MaybeSend, RetryableError, StreamHandle, retryable};
 use xmtp_db::{
     NotFound, StorageError,
@@ -43,131 +42,6 @@ use xmtp_db::{
 };
 
 pub(crate) type Result<T> = std::result::Result<T, SubscribeError>;
-
-#[derive(Debug, Error)]
-pub enum LocalEventError {
-    #[error("Unable to send event: {0}")]
-    Send(String),
-}
-
-impl RetryableError for LocalEventError {
-    fn is_retryable(&self) -> bool {
-        true
-    }
-}
-
-/// Events local to this client
-/// are broadcast across all senders/receivers of streams
-#[derive(Debug, Clone)]
-pub enum LocalEvents {
-    // a new group was created
-    NewGroup(Vec<u8>),
-    PreferencesChanged(Vec<PreferenceUpdate>),
-    // a message was deleted (contains the decoded message that was deleted)
-    MessageDeleted(Box<DecodedMessage>),
-}
-
-#[derive(Clone)]
-pub enum SyncWorkerEvent {
-    NewSyncGroupFromWelcome(Vec<u8>),
-    NewSyncGroupMsg,
-    // The sync worker will auto-sync these with other devices.
-    SyncPreferences(Vec<PreferenceUpdate>),
-    CycleHMAC,
-    Tick,
-}
-
-impl std::fmt::Debug for SyncWorkerEvent {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NewSyncGroupFromWelcome(arg0) => f
-                .debug_tuple("NewSyncGroupFromWelcome")
-                .field(&hex::encode(arg0))
-                .finish(),
-            Self::NewSyncGroupMsg => write!(f, "NewSyncGroupMsg"),
-            Self::SyncPreferences(arg0) => f.debug_tuple("SyncPreferences").field(arg0).finish(),
-            Self::CycleHMAC => write!(f, "CycleHMAC"),
-            Self::Tick => write!(f, "Tick"),
-        }
-    }
-}
-
-impl LocalEvents {
-    fn group_filter(self) -> Option<Vec<u8>> {
-        use LocalEvents::*;
-        // this is just to protect against any future variants
-        match self {
-            NewGroup(c) => Some(c),
-            _ => None,
-        }
-    }
-
-    fn consent_filter(self) -> Option<Vec<StoredConsentRecord>> {
-        match self {
-            Self::PreferencesChanged(updates) => {
-                let updates = updates
-                    .into_iter()
-                    .filter_map(|pu| match pu {
-                        PreferenceUpdate::Consent(cr) => Some(cr),
-                        _ => None,
-                    })
-                    .collect();
-                Some(updates)
-            }
-
-            _ => None,
-        }
-    }
-
-    fn preference_filter(self) -> Option<Vec<PreferenceUpdate>> {
-        match self {
-            Self::PreferencesChanged(updates) => Some(updates),
-            _ => None,
-        }
-    }
-
-    fn message_deletion_filter(self) -> Option<Box<DecodedMessage>> {
-        match self {
-            Self::MessageDeleted(message) => Some(message),
-            _ => None,
-        }
-    }
-}
-
-pub(crate) trait StreamMessages {
-    fn stream_consent_updates(self) -> impl Stream<Item = Result<Vec<StoredConsentRecord>>>;
-    fn stream_preference_updates(self) -> impl Stream<Item = Result<Vec<PreferenceUpdate>>>;
-    fn stream_message_deletions(self) -> impl Stream<Item = Result<Box<DecodedMessage>>>;
-}
-
-impl StreamMessages for broadcast::Receiver<LocalEvents> {
-    #[instrument(level = "trace", skip_all)]
-    fn stream_consent_updates(self) -> impl Stream<Item = Result<Vec<StoredConsentRecord>>> {
-        BroadcastStream::new(self).filter_map(|event| async {
-            xmtp_common::optify!(event, "Missed message due to event queue lag")
-                .and_then(LocalEvents::consent_filter)
-                .map(Result::Ok)
-        })
-    }
-
-    #[instrument(level = "trace", skip_all)]
-    fn stream_preference_updates(self) -> impl Stream<Item = Result<Vec<PreferenceUpdate>>> {
-        BroadcastStream::new(self).filter_map(|event| async {
-            xmtp_common::optify!(event, "Missed message due to event queue lag")
-                .and_then(LocalEvents::preference_filter)
-                .map(Result::Ok)
-        })
-    }
-
-    #[instrument(level = "trace", skip_all)]
-    fn stream_message_deletions(self) -> impl Stream<Item = Result<Box<DecodedMessage>>> {
-        BroadcastStream::new(self).filter_map(|event| async {
-            xmtp_common::optify!(event, "Missed message due to event queue lag")
-                .and_then(LocalEvents::message_deletion_filter)
-                .map(Result::Ok)
-        })
-    }
-}
 
 #[derive(thiserror::Error, Debug, ErrorCode)]
 pub enum SubscribeError {
