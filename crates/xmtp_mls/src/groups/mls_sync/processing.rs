@@ -840,6 +840,87 @@ where
         Ok(Some(id))
     }
 
+    fn maybe_advance_cursor_for_terminal_external_validation(
+        &self,
+        envelope: &GroupMessage,
+        error: &CommitValidationError,
+    ) -> Result<(), GroupMessageProcessingError> {
+        if !matches!(error, CommitValidationError::ProtocolVersionTooLow(_)) {
+            self.maybe_update_cursor(&self.context.db(), envelope)?;
+        }
+
+        Ok(())
+    }
+
+    fn reject_invalid_external_proposal(
+        &self,
+        mls_group: &OpenMlsGroup,
+        queued_proposal: &openmls::group::QueuedProposal,
+        envelope: &GroupMessage,
+    ) -> Result<(), GroupMessageProcessingError> {
+        let proposal_type = queued_proposal.proposal().proposal_type();
+        if let Err(e) = validate_external_proposal_message(mls_group, queued_proposal) {
+            match &e {
+                CommitValidationError::ProposalsNotEnabled => {
+                    tracing::warn!(
+                        inbox_id = self.context.inbox_id(),
+                        group_id = hex::encode(&self.group_id),
+                        ?proposal_type,
+                        "Received proposal but proposals are not enabled on this group"
+                    );
+                }
+                _ => {
+                    tracing::warn!(
+                        inbox_id = self.context.inbox_id(),
+                        installation_id = %self.context.installation_id(),
+                        group_id = hex::encode(&self.group_id),
+                        proposal_type = ?proposal_type,
+                        error = %e,
+                        "Received invalid proposal, rejecting"
+                    );
+                }
+            }
+
+            // Update cursor so we don't reprocess this invalid proposal.
+            self.maybe_update_cursor(&self.context.db(), envelope)?;
+            return Err(e.into());
+        }
+
+        Ok(())
+    }
+
+    async fn validate_processed_external_message(
+        &self,
+        mls_group: &mut OpenMlsGroup,
+        processed_message: &ProcessedMessage,
+        envelope: &GroupMessage,
+        identifier: &mut MessageIdentifierBuilder,
+    ) -> Result<Option<ValidatedCommit>, GroupMessageProcessingError> {
+        match processed_message.content() {
+            ProcessedMessageContent::StagedCommitMessage(staged_commit) => {
+                let result = validate_staged_commit(&self.context, staged_commit, mls_group).await;
+
+                let validated_commit = match result {
+                    Err(error) if !error.is_retryable() => {
+                        self.maybe_advance_cursor_for_terminal_external_validation(
+                            envelope, &error,
+                        )?;
+                        Err(error)
+                    }
+                    other => other,
+                }?;
+
+                identifier.group_context(staged_commit.group_context().clone());
+                Ok(Some(validated_commit))
+            }
+            ProcessedMessageContent::ProposalMessage(queued_proposal) => {
+                self.reject_invalid_external_proposal(mls_group, queued_proposal, envelope)?;
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
+    }
+
     #[tracing::instrument(level = "trace", skip(mls_group, envelope))]
     pub(super) async fn validate_and_process_external_message(
         &self,
@@ -885,63 +966,14 @@ where
             sender_inbox_id
         );
 
-        let validated_commit = match &processed_message.content() {
-            ProcessedMessageContent::StagedCommitMessage(staged_commit) => {
-                let result = validate_staged_commit(&self.context, staged_commit, mls_group).await;
-
-                let validated_commit = match result {
-                    Err(e) if !e.is_retryable() => {
-                        match &e {
-                            CommitValidationError::ProtocolVersionTooLow(_) => {}
-                            _ => {
-                                self.maybe_update_cursor(&self.context.db(), envelope)?;
-                            }
-                        };
-
-                        Err(e)
-                    }
-                    v => v,
-                }?;
-
-                identifier.group_context(staged_commit.group_context().clone());
-                Some(validated_commit)
-            }
-            ProcessedMessageContent::ProposalMessage(queued_proposal) => {
-                // Reject Add/Remove proposals if proposals are not enabled on this group.
-                // GCE proposals are exempt because enable_proposals() uses them to bootstrap
-                // proposal support — they must be allowed through to flip the flag on.
-                let proposal_type = queued_proposal.proposal().proposal_type();
-                if let Err(e) = validate_external_proposal_message(mls_group, queued_proposal) {
-                    match &e {
-                        CommitValidationError::ProposalsNotEnabled => {
-                            tracing::warn!(
-                                inbox_id = self.context.inbox_id(),
-                                group_id = hex::encode(&self.group_id),
-                                ?proposal_type,
-                                "Received proposal but proposals are not enabled on this group"
-                            );
-                        }
-                        _ => {
-                            tracing::warn!(
-                                inbox_id = self.context.inbox_id(),
-                                installation_id = %self.context.installation_id(),
-                                group_id = hex::encode(&self.group_id),
-                                proposal_type = ?proposal_type,
-                                error = %e,
-                                "Received invalid proposal, rejecting"
-                            );
-                        }
-                    }
-
-                    // Update cursor so we don't reprocess this invalid proposal
-                    self.maybe_update_cursor(&self.context.db(), envelope)?;
-                    return Err(e.into());
-                }
-
-                None
-            }
-            _ => None,
-        };
+        let validated_commit = self
+            .validate_processed_external_message(
+                mls_group,
+                &processed_message,
+                envelope,
+                &mut identifier,
+            )
+            .await?;
 
         let mut deferred_events = DeferredEvents::new();
         let identifier = provider.key_store().transaction(|conn| {
