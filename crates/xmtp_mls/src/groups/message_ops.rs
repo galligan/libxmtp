@@ -1,5 +1,5 @@
 use super::{
-    GroupError, MlsGroup, QueryableContentFields, SendMessageOpts,
+    GroupError, MlsGroup, QueryableContentFields,
     error::DeleteMessageError,
     intents::{QueueIntent, SendMessageIntentData},
     send_message_opts,
@@ -227,7 +227,8 @@ where
         let mut buf = Vec::new();
         encoded_delete.encode(&mut buf)?;
 
-        let deletion_message_id = self.send_message_optimistic(&buf, SendMessageOpts::default())?;
+        let deletion_message_id =
+            self.send_message_optimistic(&buf, send_message_opts::SendMessageOpts::default())?;
 
         let is_super_admin_deletion = !is_sender && is_super_admin;
         let deletion = StoredMessageDeletion {
