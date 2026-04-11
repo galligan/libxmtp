@@ -841,21 +841,20 @@ where
             return Ok(None);
         };
         tracing::debug!("setting message @cursor=[{}] to published", envelope.cursor);
-        let message_expire_at_ns = Self::get_message_expire_at_ns(mls_group);
-        storage
-            .db()
-            .set_delivery_status_to_published(
-                &id,
-                envelope_timestamp_ns as u64,
-                envelope.cursor,
-                message_expire_at_ns,
-            )
-            .map_err(|err| IntentResolutionError {
-                processing_error: GroupMessageProcessingError::Db(err),
-                next_intent_state: IntentState::Error,
-            })?;
-        self.process_own_leave_request_message(mls_group, storage, &id);
-        self.process_own_delete_message(storage, &id);
+        self.finalize_published_own_application_message(
+            mls_group,
+            &id,
+            envelope_timestamp_ns,
+            envelope.cursor,
+            storage,
+        )
+        .map_err(|err| IntentResolutionError {
+            processing_error: err,
+            // If the error is non-retriable, the optimistic message (which is already in the db)
+            // will never have its delivery status updated to published. We mark the intent as
+            // errored and continue so later syncs don't keep retrying a broken finalization path.
+            next_intent_state: IntentState::Error,
+        })?;
         Ok(Some(id))
     }
 
@@ -1203,7 +1202,7 @@ where
         Ok(())
     }
 
-    fn get_message_expire_at_ns(mls_group: &OpenMlsGroup) -> Option<i64> {
+    pub(super) fn get_message_expire_at_ns(mls_group: &OpenMlsGroup) -> Option<i64> {
         let mutable_metadata = extract_group_mutable_metadata(mls_group).ok()?;
         let group_disappearing_settings =
             Self::conversation_message_disappearing_settings_from_extensions(&mutable_metadata)

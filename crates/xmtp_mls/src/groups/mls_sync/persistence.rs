@@ -350,6 +350,26 @@ where
         Ok(transcript)
     }
 
+    pub(super) fn finalize_published_own_application_message(
+        &self,
+        mls_group: &OpenMlsGroup,
+        message_id: &[u8],
+        envelope_timestamp_ns: i64,
+        cursor: Cursor,
+        storage: &impl XmtpMlsStorageProvider,
+    ) -> Result<(), GroupMessageProcessingError> {
+        let message_expire_at_ns = Self::get_message_expire_at_ns(mls_group);
+        storage.db().set_delivery_status_to_published(
+            &message_id,
+            envelope_timestamp_ns as u64,
+            cursor,
+            message_expire_at_ns,
+        )?;
+        self.process_own_leave_request_message(mls_group, storage, message_id);
+        self.process_own_delete_message(storage, message_id);
+        Ok(())
+    }
+
     pub(super) fn update_already_exists(
         &self,
         payload: &GroupUpdated,
