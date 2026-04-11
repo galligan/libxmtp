@@ -214,6 +214,41 @@ async fn test_duplicate_dm_not_streamed() {
     assert!(result.is_err(), "Duplicate DM was unexpectedly streamed");
 }
 
+#[xmtp_common::timeout(std::time::Duration::from_secs(15))]
+#[rstest::rstest]
+#[xmtp_common::test]
+async fn test_duplicate_dm_streamed_when_included() {
+    let client1 = Arc::new(ClientBuilder::new_test_client(&generate_local_wallet()).await);
+    let client2 = Arc::new(ClientBuilder::new_test_client(&generate_local_wallet()).await);
+
+    let mut stream = client1.stream_conversations(None, true).await.unwrap();
+
+    let dm1 = client1
+        .find_or_create_dm(client2.inbox_id().to_string(), None)
+        .await
+        .unwrap();
+
+    let streamed_dm1 = stream.next().await.unwrap();
+    assert!(streamed_dm1.is_ok());
+    assert_eq!(streamed_dm1.unwrap().group_id, dm1.group_id);
+
+    let dm2 = client2
+        .find_or_create_dm(client1.inbox_id().to_string(), None)
+        .await
+        .unwrap();
+
+    assert_ne!(dm1.group_id, dm2.group_id);
+
+    let streamed_dm2 =
+        xmtp_common::time::timeout(std::time::Duration::from_secs(10), stream.next())
+            .await
+            .expect("duplicate DM should be streamed when include_duplicate_dms is enabled")
+            .expect("stream should yield a second DM")
+            .expect("second streamed DM should be valid");
+
+    assert_eq!(streamed_dm2.group_id, dm2.group_id);
+}
+
 #[xmtp_common::timeout(std::time::Duration::from_secs(120))]
 #[rstest::rstest]
 #[case::five_dms(5)]
