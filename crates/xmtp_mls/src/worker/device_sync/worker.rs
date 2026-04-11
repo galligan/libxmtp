@@ -1,6 +1,5 @@
 use super::{
-    ArchiveOptions, BackupElementSelection, DeviceSyncClient, DeviceSyncError, IterWithContent,
-    catalog::{find_requested_archive_reply, list_available_archives_from_db},
+    ArchiveOptions, BackupElementSelection, DeviceSyncClient, DeviceSyncError,
     preference_sync::PreferenceUpdate,
 };
 use crate::{
@@ -10,30 +9,21 @@ use crate::{
     subscriptions::SyncWorkerEvent,
     worker::{
         BoxedWorker, DynMetrics, MetricsCasting, Worker, WorkerFactory, WorkerKind, WorkerResult,
-        device_sync::{AvailableArchive, archive::insert_importer},
         metrics::WorkerMetrics,
     },
 };
-use futures::{StreamExt, TryFutureExt};
+use futures::TryFutureExt;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{OnceCell, broadcast};
-use tokio_util::compat::TokioAsyncReadCompatExt;
 use tracing::instrument;
-use xmtp_archive::{ArchiveImporter, exporter::ArchiveExporter};
+use xmtp_archive::exporter::ArchiveExporter;
 use xmtp_common::Event;
-use xmtp_db::group_message::{MsgQueryArgs, StoredGroupMessage};
 use xmtp_db::prelude::*;
 use xmtp_macro::log_event;
-use xmtp_proto::{
-    ConversionError,
-    xmtp::device_sync::{
-        BackupElementSelection as BackupElementSelectionProto,
-        content::{
-            DeviceSyncKeyType, DeviceSyncReply as DeviceSyncReplyProto,
-            DeviceSyncRequest as DeviceSyncRequestProto,
-            device_sync_content::Content as ContentProto, device_sync_key_type::Key,
-        },
-    },
+use xmtp_proto::xmtp::device_sync::content::{
+    DeviceSyncKeyType, DeviceSyncReply as DeviceSyncReplyProto,
+    DeviceSyncRequest as DeviceSyncRequestProto, device_sync_content::Content as ContentProto,
+    device_sync_key_type::Key,
 };
 
 const ENC_KEY_SIZE: usize = xmtp_archive::ENC_KEY_SIZE;
@@ -380,111 +370,6 @@ where
             .await
             .map_err(|e| GroupError::DeviceSync(Box::new(e)))?;
 
-        Ok(())
-    }
-
-    pub(super) async fn is_reply_requested_by_installation(
-        &self,
-        reply: &DeviceSyncReplyProto,
-    ) -> Result<bool, DeviceSyncError> {
-        let sync_group = self.get_sync_group().await?;
-        let messages = sync_group.find_messages(&MsgQueryArgs::default())?;
-
-        for (msg, content) in messages.iter_with_content() {
-            if let ContentProto::Request(DeviceSyncRequestProto { pin, .. }) = content
-                && *pin == reply.request_id
-                && msg.sender_installation_id == self.installation_id()
-            {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
-    /// Processes sync archive with a matching pin. If no pin is provided, will process latest archive.
-    pub async fn process_archive_with_pin(&self, pin: Option<&str>) -> Result<(), DeviceSyncError> {
-        let conn = self.context.db();
-        if let Some((msg, reply)) = find_requested_archive_reply(&conn, pin)? {
-            return self.process_archive(&msg, reply).await;
-        }
-
-        Err(DeviceSyncError::MissingPayload(pin.map(str::to_string)))
-    }
-
-    pub fn list_available_archives(
-        &self,
-        days_cutoff: i64,
-    ) -> Result<Vec<AvailableArchive>, DeviceSyncError> {
-        list_available_archives_from_db(&self.context.db(), days_cutoff)
-    }
-
-    pub async fn process_archive(
-        &self,
-        msg: &StoredGroupMessage,
-        reply: DeviceSyncReplyProto,
-    ) -> Result<(), DeviceSyncError> {
-        log_event!(
-            Event::DeviceSyncArchiveProcessingStart,
-            self.context.installation_id(),
-            msg_id = #msg.id,
-            group_id = msg.group_id
-        );
-        if reply.kind() != BackupElementSelectionProto::Unspecified {
-            log_event!(Event::DeviceSyncV1Archive, self.context.installation_id());
-            // This is a legacy payload, the legacy function will process it.
-            return Ok(());
-        }
-
-        self.welcome_service.sync_welcomes().await?;
-
-        // Get a download stream of the payload.
-        log_event!(
-            Event::DeviceSyncArchiveDownloading,
-            self.context.installation_id()
-        );
-        let response = reqwest::Client::new().get(reply.url).send().await?;
-        if let Err(err) = response.error_for_status_ref() {
-            log_event!(
-                Event::DeviceSyncPayloadDownloadFailure,
-                self.context.installation_id(),
-                status = %response.status(),
-                err = %err
-            );
-            return Err(DeviceSyncError::Reqwest(err));
-        }
-
-        log_event!(
-            Event::DeviceSyncArchiveImportStart,
-            self.context.installation_id()
-        );
-
-        let stream = response
-            .bytes_stream()
-            .map(|result| result.map_err(std::io::Error::other));
-        // Convert that stream into a reader
-        let tokio_reader = tokio_util::io::StreamReader::new(stream);
-        // Convert that tokio reader into a futures reader.
-        // We use futures reader for WASM compat.
-        let reader = tokio_reader.compat();
-
-        // Create an importer around that futures_reader.
-        let Some(DeviceSyncKeyType {
-            key: Some(Key::Aes256Gcm(key)),
-        }) = reply.encryption_key
-        else {
-            return Err(ConversionError::Unspecified("encryption_key"))?;
-        };
-
-        let mut importer = ArchiveImporter::load(Box::pin(reader), &key).await?;
-
-        tracing::info!("Importing the sync payload.");
-        // Run the import.
-        insert_importer(&mut importer, &self.context).await?;
-
-        log_event!(
-            Event::DeviceSyncArchiveImportSuccess,
-            self.context.installation_id()
-        );
         Ok(())
     }
 }
