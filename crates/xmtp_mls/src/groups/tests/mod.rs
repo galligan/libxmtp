@@ -3434,6 +3434,25 @@ async fn process_messages_abort_on_retryable_error() {
         .unwrap()
         .group_messages()
         .unwrap();
+    let blocked_message = bo_messages
+        .last()
+        .expect("expected messages to process");
+    let blocked_cursor = blocked_message.cursor.clone();
+    let blocked_originator = blocked_message.originator_id();
+    let blocked_entity_kind = if blocked_message.is_commit() {
+        EntityKind::CommitMessage
+    } else {
+        EntityKind::ApplicationMessage
+    };
+    let cursor_before = bo
+        .context
+        .db()
+        .get_last_cursor_for_originator(
+            &bo_group.group_id,
+            blocked_entity_kind,
+            blocked_originator,
+        )
+        .unwrap();
 
     let db = bo.context.store().db();
     db.raw_query_write(|c| {
@@ -3442,13 +3461,50 @@ async fn process_messages_abort_on_retryable_error() {
     })
     .unwrap();
 
-    let process_result = bo_group.process_messages(bo_messages).await;
+    let process_result = bo_group.process_messages(bo_messages.clone()).await;
     assert!(process_result.is_errored());
     assert_eq!(process_result.errored.len(), 1);
     assert!(process_result.errored.iter().any(|(_, err)| {
         err.to_string()
             .contains("cannot start a transaction within a transaction")
     }));
+
+    let cursor_after_failure = bo
+        .context
+        .db()
+        .get_last_cursor_for_originator(
+            &bo_group.group_id,
+            blocked_entity_kind,
+            blocked_originator,
+        )
+        .unwrap();
+    assert_eq!(
+        cursor_before, cursor_after_failure,
+        "retryable transaction failure should not consume cursor progress"
+    );
+
+    db.raw_query_write(|c| {
+        c.batch_execute("ROLLBACK").unwrap();
+        Ok::<_, diesel::result::Error>(())
+    })
+    .unwrap();
+
+    let expected_total = bo_messages.len();
+    let replay_result = bo_group.process_messages(bo_messages).await;
+    assert!(replay_result.errored.is_empty());
+    assert_eq!(replay_result.total(), expected_total);
+    assert_eq!(replay_result.last(), Some(blocked_cursor));
+
+    let cursor_after_replay = bo
+        .context
+        .db()
+        .get_last_cursor_for_originator(
+            &bo_group.group_id,
+            blocked_entity_kind,
+            blocked_originator,
+        )
+        .unwrap();
+    assert_eq!(cursor_after_replay, blocked_cursor);
 }
 
 #[xmtp_common::test]
