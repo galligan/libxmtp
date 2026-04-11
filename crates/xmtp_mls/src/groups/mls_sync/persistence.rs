@@ -1,4 +1,5 @@
 use super::*;
+use crate::groups::QueryableContentFields;
 use xmtp_common::{MaybeSend, MaybeSync};
 
 pub(super) trait ForkDetectionContext: MaybeSend + MaybeSync {
