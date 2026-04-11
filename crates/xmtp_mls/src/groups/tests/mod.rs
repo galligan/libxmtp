@@ -3594,6 +3594,21 @@ async fn skip_already_processed_intents() {
         .unwrap();
     let send_intent_cursor = (send_intent.sequence_id, send_intent.originator_id);
     let messages_before = bo_group.find_messages(&MsgQueryArgs::default()).unwrap();
+    let commit_log_before = bo_group
+        .local_commit_log()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|log| {
+            (
+                log.rowid,
+                log.commit_sequence_id,
+                log.commit_result,
+                log.applied_epoch_number,
+                log.commit_type,
+            )
+        })
+        .collect::<Vec<_>>();
 
     let process_result = bo_group.sync_until_intent_resolved(send_intent.id).await;
     assert_ok!(process_result);
@@ -3646,6 +3661,23 @@ async fn skip_already_processed_intents() {
             .map(|message| message.id.clone())
             .collect::<Vec<_>>()
     );
+
+    let commit_log_after = bo_group
+        .local_commit_log()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|log| {
+            (
+                log.rowid,
+                log.commit_sequence_id,
+                log.commit_result,
+                log.applied_epoch_number,
+                log.commit_type,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(commit_log_after, commit_log_before);
 }
 
 #[xmtp_common::test]
