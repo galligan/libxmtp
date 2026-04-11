@@ -122,7 +122,7 @@ pub async fn create_client_with_backend(
 
   let store = super::build_store(db_path, encryption_key).await?;
 
-  let cursor_store = xmtp_mls::cursor_store::SqliteCursorStore::new(store.db());
+  let cursor_store = xmtp_mls::SqliteCursorStore::new(store.db());
   let mut mbb = xmtp_api_d14n::MessageBackendBuilder::default();
   mbb.cursor_store(cursor_store);
   let api_client = mbb

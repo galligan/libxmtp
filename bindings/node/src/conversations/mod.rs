@@ -127,8 +127,8 @@ pub struct GroupSyncSummary {
   pub num_synced: u32,
 }
 
-impl From<xmtp_mls::groups::welcome_sync::GroupSyncSummary> for GroupSyncSummary {
-  fn from(summary: xmtp_mls::groups::welcome_sync::GroupSyncSummary) -> Self {
+impl From<xmtp_mls::GroupSyncSummary> for GroupSyncSummary {
+  fn from(summary: xmtp_mls::GroupSyncSummary) -> Self {
     Self {
       num_eligible: summary.num_eligible as u32,
       num_synced: summary.num_synced as u32,

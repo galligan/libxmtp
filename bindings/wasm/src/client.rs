@@ -12,11 +12,11 @@ use wasm_bindgen::{JsValue, prelude::*};
 use xmtp_api_d14n::MessageBackendBuilder;
 use xmtp_db::{EncryptedMessageStore, StorageOption, WasmDb};
 use xmtp_id::associations::Identifier as XmtpIdentifier;
-use xmtp_mls::Client as MlsClient;
-use xmtp_mls::builder::DeviceSyncMode as XmtpDeviceSyncMode;
-use xmtp_mls::cursor_store::SqliteCursorStore;
-use xmtp_mls::groups::MlsGroup;
-use xmtp_mls::identity::IdentityStrategy;
+use xmtp_mls::{
+  Client as MlsClient, DeviceSyncMode as XmtpDeviceSyncMode, GroupSyncSummary as XmtpGroupSyncSummary,
+  IdentityStrategy, MlsGroup, Quorum, SqliteCursorStore,
+  VisibilityConfirmationOptions as XmtpVisibilityConfirmationOptions,
+};
 use xmtp_proto::api_client::AggregateStats;
 
 use crate::ErrorWrapper;
@@ -145,8 +145,8 @@ pub struct GroupSyncSummary {
   pub num_synced: u32,
 }
 
-impl From<xmtp_mls::groups::welcome_sync::GroupSyncSummary> for GroupSyncSummary {
-  fn from(summary: xmtp_mls::groups::welcome_sync::GroupSyncSummary) -> Self {
+impl From<XmtpGroupSyncSummary> for GroupSyncSummary {
+  fn from(summary: XmtpGroupSyncSummary) -> Self {
     Self {
       num_eligible: summary.num_eligible as u32,
       num_synced: summary.num_synced as u32,
@@ -177,12 +177,8 @@ pub struct WasmVisibilityConfirmationOptions {
   pub timeout_ms: Option<u32>,
 }
 
-impl From<WasmVisibilityConfirmationOptions>
-  for xmtp_mls::registration_visible::VisibilityConfirmationOptions
-{
+impl From<WasmVisibilityConfirmationOptions> for XmtpVisibilityConfirmationOptions {
   fn from(opts: WasmVisibilityConfirmationOptions) -> Self {
-    use xmtp_mls::registration_visible::Quorum;
-
     let defaults = Self::default();
     let quorum = match (opts.quorum_absolute, opts.quorum_percentage) {
       (Some(n), _) => Quorum::Absolute(n as usize),

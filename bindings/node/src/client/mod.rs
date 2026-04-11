@@ -6,8 +6,7 @@ use napi::bindgen_prelude::{Error, Result};
 use napi_derive::napi;
 use std::collections::HashMap;
 use std::sync::Arc;
-use xmtp_mls::Client as MlsClient;
-use xmtp_mls::groups::MlsGroup;
+use xmtp_mls::{Client as MlsClient, MlsGroup};
 
 pub mod backend;
 mod consent_state;

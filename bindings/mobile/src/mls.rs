@@ -61,9 +61,6 @@ use xmtp_id::{
     },
 };
 use xmtp_mls::client::inbox_addresses_with_verifier;
-use xmtp_mls::context::XmtpSharedContext;
-use xmtp_mls::cursor_store::SqliteCursorStore;
-use xmtp_mls::groups::ConversationDebugInfo;
 use xmtp_mls::identity_updates::revoke_installations_with_verifier;
 use xmtp_mls::identity_updates::{
     apply_signature_request_with_verifier, get_creation_signature_kind,
@@ -74,9 +71,12 @@ use xmtp_mls::mls_common::group_metadata::GroupMetadata;
 use xmtp_mls::mls_common::group_mutable_metadata::MessageDisappearingSettings;
 use xmtp_mls::mls_common::group_mutable_metadata::MetadataField;
 use xmtp_mls::{
-    client::Client as MlsClient,
+    Client as MlsClient, ConversationDebugInfo, GroupSyncSummary as XmtpGroupSyncSummary,
+    IdentityStrategy, MlsGroup, SqliteCursorStore, XmtpSharedContext,
+};
+use xmtp_mls::{
     groups::{
-        MlsGroup, PreconfiguredPolicies, UpdateAdminListType,
+        PreconfiguredPolicies, UpdateAdminListType,
         group_permissions::{
             BasePolicies, GroupMutablePermissions, GroupMutablePermissionsError,
             MembershipPolicies, MetadataBasePolicies, MetadataPolicies, PermissionsBasePolicies,
@@ -85,7 +85,6 @@ use xmtp_mls::{
         intents::{PermissionPolicyOption, PermissionUpdateType, UpdateGroupMembershipResult},
         members::PermissionLevel,
     },
-    identity::IdentityStrategy,
     subscriptions::SubscribeError,
     worker::device_sync::preference_sync::PreferenceUpdate,
 };
@@ -1050,8 +1049,8 @@ pub struct FfiGroupSyncSummary {
     pub num_synced: u64,
 }
 
-impl From<xmtp_mls::groups::welcome_sync::GroupSyncSummary> for FfiGroupSyncSummary {
-    fn from(summary: xmtp_mls::groups::welcome_sync::GroupSyncSummary) -> Self {
+impl From<XmtpGroupSyncSummary> for FfiGroupSyncSummary {
+    fn from(summary: XmtpGroupSyncSummary) -> Self {
         Self {
             num_eligible: summary.num_eligible as u64,
             num_synced: summary.num_synced as u64,

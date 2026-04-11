@@ -1,6 +1,6 @@
 use napi_derive::napi;
 use xmtp_configuration::XmtpEnv as CoreXmtpEnv;
-use xmtp_mls::builder::DeviceSyncMode as XmtpSyncWorkerMode;
+use xmtp_mls::DeviceSyncMode as XmtpSyncWorkerMode;
 
 #[napi(string_enum)]
 #[derive(Debug)]
