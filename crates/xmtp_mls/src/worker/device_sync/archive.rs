@@ -9,15 +9,87 @@ use crate::{
 use futures::StreamExt;
 pub use xmtp_archive::*;
 use xmtp_db::{
-    ConnectionExt, StoreOrIgnore,
+    ConnectionExt, StoreOrIgnore, XmtpDb,
     consent_record::StoredConsentRecord,
     group::{ConversationType, DmIdExt, GroupMembershipState},
     group_message::StoredGroupMessage,
     prelude::*,
 };
+use xmtp_id::{InboxId, InboxIdRef};
 use xmtp_mls_common::group::{DMMetadataOptions, GroupMetadataOptions};
 use xmtp_mls_common::group_mutable_metadata::MessageDisappearingSettings;
 use xmtp_proto::xmtp::device_sync::{BackupElement, backup_element::Element};
+
+#[doc(hidden)]
+pub trait ArchiveImportContext {
+    type Db: XmtpDb;
+
+    fn archive_db(&self) -> <Self::Db as XmtpDb>::DbQuery;
+    fn inbox_id(&self) -> InboxIdRef<'_>;
+
+    fn insert_restored_group(
+        &self,
+        group_id: &[u8],
+        opts: GroupMetadataOptions,
+    ) -> Result<(), DeviceSyncError>;
+
+    fn insert_restored_dm(
+        &self,
+        group_id: &[u8],
+        dm_target_inbox_id: InboxId,
+        opts: DMMetadataOptions,
+    ) -> Result<(), DeviceSyncError>;
+}
+
+impl<Context> ArchiveImportContext for Context
+where
+    Context: XmtpSharedContext,
+{
+    type Db = Context::Db;
+
+    fn archive_db(&self) -> <Self::Db as XmtpDb>::DbQuery {
+        XmtpSharedContext::db(self)
+    }
+
+    fn inbox_id(&self) -> InboxIdRef<'_> {
+        XmtpSharedContext::inbox_id(self)
+    }
+
+    fn insert_restored_group(
+        &self,
+        group_id: &[u8],
+        opts: GroupMetadataOptions,
+    ) -> Result<(), DeviceSyncError> {
+        MlsGroup::insert(
+            self,
+            Some(group_id),
+            GroupMembershipState::Restored,
+            ConversationType::Group,
+            PolicySet::default(),
+            opts,
+            None,
+        )?;
+
+        Ok(())
+    }
+
+    fn insert_restored_dm(
+        &self,
+        group_id: &[u8],
+        dm_target_inbox_id: InboxId,
+        opts: DMMetadataOptions,
+    ) -> Result<(), DeviceSyncError> {
+        MlsGroup::create_dm_and_insert(
+            self,
+            GroupMembershipState::Restored,
+            dm_target_inbox_id,
+            opts,
+            Some(group_id),
+        )?;
+
+        Ok(())
+    }
+}
 
 #[derive(Default)]
 struct ImportContext {
@@ -25,14 +97,14 @@ struct ImportContext {
 }
 
 impl ImportContext {
-    fn post_import(&self, context: &impl XmtpSharedContext) -> Result<(), DeviceSyncError> {
+    fn post_import(&self, context: &impl ArchiveImportContext) -> Result<(), DeviceSyncError> {
         use xmtp_db::diesel::prelude::*;
         use xmtp_db::schema::groups::dsl;
 
         // We want to update the group timestamps to either be what they were before the import,
         // or what they are in the archive group field.
         for (group_id, timestamp) in &self.group_timestamps {
-            if let Err(err) = context.db().raw_query_write(|conn| {
+            if let Err(err) = context.archive_db().raw_query_write(|conn| {
                 xmtp_db::diesel::update(dsl::groups.find(group_id))
                     .set(dsl::last_message_ns.eq(*timestamp))
                     .execute(conn)
@@ -47,7 +119,7 @@ impl ImportContext {
 
 pub async fn insert_importer(
     importer: &mut ArchiveImporter,
-    context: &impl XmtpSharedContext,
+    context: &impl ArchiveImportContext,
 ) -> Result<(), DeviceSyncError> {
     let mut import_ctx = ImportContext::default();
 
@@ -65,7 +137,7 @@ pub async fn insert_importer(
 
 fn insert(
     element: BackupElement,
-    context: &impl XmtpSharedContext,
+    context: &impl ArchiveImportContext,
     import_context: &mut ImportContext,
 ) -> Result<(), DeviceSyncError> {
     let Some(element) = element.element else {
@@ -75,10 +147,10 @@ fn insert(
     match element {
         Element::Consent(consent) => {
             let consent: StoredConsentRecord = consent.try_into()?;
-            context.db().insert_newer_consent_record(consent)?;
+            context.archive_db().insert_newer_consent_record(consent)?;
         }
         Element::Group(save) => {
-            if let Ok(Some(existing_group)) = context.db().find_group(&save.id) {
+            if let Ok(Some(existing_group)) = context.archive_db().find_group(&save.id) {
                 let timestamp = match (existing_group.last_message_ns, save.last_message_ns) {
                     (Some(e), Some(s)) => Some(e.max(s)),
                     (None, Some(s)) => Some(s),
@@ -124,23 +196,17 @@ fn insert(
 
                     let target_inbox_id = dm_id.other_inbox_id(context.inbox_id());
 
-                    MlsGroup::create_dm_and_insert(
-                        context,
-                        GroupMembershipState::Restored,
+                    context.insert_restored_dm(
+                        &save.id,
                         target_inbox_id,
                         DMMetadataOptions {
                             message_disappearing_settings,
                         },
-                        Some(&save.id),
                     )?;
                 }
                 _ => {
-                    MlsGroup::insert(
-                        context,
-                        Some(&save.id),
-                        GroupMembershipState::Restored,
-                        ConversationType::Group,
-                        PolicySet::default(),
+                    context.insert_restored_group(
+                        &save.id,
                         GroupMetadataOptions {
                             name: attributes.get("group_name").cloned(),
                             image_url_square: attributes.get("group_image_url_square").cloned(),
@@ -148,14 +214,13 @@ fn insert(
                             app_data: attributes.get("app_data").cloned(),
                             message_disappearing_settings,
                         },
-                        None,
                     )?;
                 }
             }
         }
         Element::GroupMessage(message) => {
             let message: StoredGroupMessage = message.try_into()?;
-            message.store_or_ignore(&context.db())?;
+            message.store_or_ignore(&context.archive_db())?;
         }
         _ => {}
     }
@@ -362,9 +427,7 @@ mod tests {
         let alix2 = ClientBuilder::new_test_client(&alix2_wallet).await;
 
         // No messages
-        let messages: Vec<StoredGroupMessage> = alix2
-            .context
-            .db()
+        let messages: Vec<StoredGroupMessage> = XmtpSharedContext::db(&alix2.context)
             .raw_query_read(|conn| group_messages::table.load(conn))
             .unwrap();
         assert_eq!(messages.len(), 0);
@@ -377,9 +440,7 @@ mod tests {
             .unwrap();
 
         // One message.
-        let messages: Vec<StoredGroupMessage> = alix2
-            .context
-            .db()
+        let messages: Vec<StoredGroupMessage> = XmtpSharedContext::db(&alix2.context)
             .raw_query_read(|conn| group_messages::table.load(conn))
             .unwrap();
         assert_eq!(messages.len(), 1);
