@@ -1,6 +1,7 @@
 use bindings_wasm_macros::wasm_bindgen_numbered_enum;
 use serde::{Deserialize, Serialize};
 use tsify::Tsify;
+use xmtp_mls::DeletedBy as XmtpDeletedBy;
 
 #[derive(Clone, Serialize, Deserialize, Tsify)]
 #[tsify(into_wasm_abi, from_wasm_abi)]
@@ -17,14 +18,14 @@ pub enum DeletedBy {
   Admin = 1,
 }
 
-impl From<xmtp_mls::messages::decoded_message::DeletedBy> for DeletedMessage {
-  fn from(value: xmtp_mls::messages::decoded_message::DeletedBy) -> Self {
+impl From<XmtpDeletedBy> for DeletedMessage {
+  fn from(value: XmtpDeletedBy) -> Self {
     match value {
-      xmtp_mls::messages::decoded_message::DeletedBy::Sender => DeletedMessage {
+      XmtpDeletedBy::Sender => DeletedMessage {
         deleted_by: DeletedBy::Sender,
         admin_inbox_id: None,
       },
-      xmtp_mls::messages::decoded_message::DeletedBy::Admin(inbox_id) => DeletedMessage {
+      XmtpDeletedBy::Admin(inbox_id) => DeletedMessage {
         deleted_by: DeletedBy::Admin,
         admin_inbox_id: Some(inbox_id),
       },

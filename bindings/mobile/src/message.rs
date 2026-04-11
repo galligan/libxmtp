@@ -13,9 +13,9 @@ use xmtp_content_types::{
     wallet_send_calls::{WalletCall, WalletCallMetadata, WalletSendCalls},
 };
 use xmtp_db::group_message::{DeliveryStatus, GroupMessageKind};
-use xmtp_mls::messages::decoded_message::{
-    DecodedMessage, DecodedMessageMetadata, DeletedBy, Markdown, MessageBody,
-    Reply as ProcessedReply, Text,
+use xmtp_mls::{
+    DecodedMessage, DecodedMessageMetadata, DecodedReply as ProcessedReply, DeletedBy, Markdown,
+    MessageBody, Text,
 };
 use xmtp_proto::xmtp::mls::message_contents::{
     ContentTypeId, EncodedContent, GroupUpdated, group_updated::MetadataFieldChange,

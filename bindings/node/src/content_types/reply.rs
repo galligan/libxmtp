@@ -5,13 +5,13 @@ use napi::bindgen_prelude::Result;
 use napi_derive::napi;
 use xmtp_content_types::ContentCodec;
 use xmtp_content_types::reply::ReplyCodec;
-use xmtp_mls::messages::decoded_message::DecodedMessage as RustDecodedMessage;
+use xmtp_mls::{DecodedMessage as RustDecodedMessage, DecodedReply, MessageBody};
 
 #[derive(Clone)]
 #[napi]
 pub struct EnrichedReply {
   in_reply_to: Option<Box<RustDecodedMessage>>,
-  content: Box<xmtp_mls::messages::decoded_message::MessageBody>,
+  content: Box<MessageBody>,
   reference_id: String,
 }
 
@@ -37,8 +37,8 @@ impl EnrichedReply {
   }
 }
 
-impl From<xmtp_mls::messages::decoded_message::Reply> for EnrichedReply {
-  fn from(reply: xmtp_mls::messages::decoded_message::Reply) -> Self {
+impl From<DecodedReply> for EnrichedReply {
+  fn from(reply: DecodedReply) -> Self {
     Self {
       in_reply_to: reply.in_reply_to,
       content: reply.content,

@@ -26,6 +26,10 @@ pub use groups::{
     welcome_sync::GroupSyncSummary,
 };
 pub use identity::IdentityStrategy;
+pub use messages::decoded_message::{
+    DecodedMessage, DecodedMessageMetadata, DeletedBy, Markdown, MessageBody,
+    Reply as DecodedReply, Text,
+};
 pub use registration_visible::{Quorum, VisibilityConfirmationOptions};
 pub use subscriptions::SubscribeError;
 

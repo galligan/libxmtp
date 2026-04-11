@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use tsify::Tsify;
 use wasm_bindgen::JsError;
-use xmtp_mls::messages::decoded_message::DecodedMessage as XmtpDecodedMessage;
+use xmtp_mls::DecodedMessage as XmtpDecodedMessage;
 
 use crate::content_types::decoded_message_content::DecodedMessageContent;
 use crate::encoded_content::ContentTypeId;

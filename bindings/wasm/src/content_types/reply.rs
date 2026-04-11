@@ -6,6 +6,7 @@ use tsify::Tsify;
 use wasm_bindgen::prelude::wasm_bindgen;
 use xmtp_content_types::ContentCodec;
 use xmtp_content_types::reply::ReplyCodec;
+use xmtp_mls::DecodedReply;
 
 #[derive(Clone, Serialize, Deserialize, Tsify)]
 #[tsify(into_wasm_abi, from_wasm_abi)]
@@ -18,10 +19,10 @@ pub struct EnrichedReply {
   pub in_reply_to: Option<Box<DecodedMessage>>,
 }
 
-impl TryFrom<xmtp_mls::messages::decoded_message::Reply> for EnrichedReply {
+impl TryFrom<DecodedReply> for EnrichedReply {
   type Error = wasm_bindgen::JsError;
 
-  fn try_from(reply: xmtp_mls::messages::decoded_message::Reply) -> Result<Self, Self::Error> {
+  fn try_from(reply: DecodedReply) -> Result<Self, Self::Error> {
     let content = reply.content.as_ref().clone().try_into()?;
     let in_reply_to = reply
       .in_reply_to
