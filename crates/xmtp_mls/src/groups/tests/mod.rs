@@ -4097,6 +4097,145 @@ async fn skip_already_processed_membership_update_intent() {
 }
 
 #[xmtp_common::test]
+async fn skip_already_processed_membership_removal_intent() {
+    tester!(alix);
+    tester!(bo);
+    tester!(charlie);
+
+    let alix_group = alix.create_group(None, None).unwrap();
+    alix_group
+        .add_members(&[bo.inbox_id(), charlie.inbox_id()])
+        .await
+        .unwrap();
+    alix_group.remove_members(&[charlie.inbox_id()]).await.unwrap();
+
+    let processed_intents_before = alix
+        .context
+        .db()
+        .find_group_intents(
+            alix_group.clone().group_id,
+            Some(vec![IntentState::Processed]),
+            None,
+        )
+        .unwrap();
+    let membership_removal_intent = processed_intents_before
+        .iter()
+        .filter(|intent| intent.kind == IntentKind::UpdateGroupMembership)
+        .max_by_key(|intent| intent.id)
+        .unwrap();
+    let membership_removal_cursor = (
+        membership_removal_intent.sequence_id,
+        membership_removal_intent.originator_id,
+    );
+
+    let membership_updates_before = alix_group
+        .find_messages(&MsgQueryArgs {
+            content_types: Some(vec![ContentType::GroupUpdated]),
+            ..Default::default()
+        })
+        .unwrap()
+        .into_iter()
+        .map(|message| message.id)
+        .collect::<Vec<_>>();
+    let commit_log_before = alix_group
+        .local_commit_log()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|log| {
+            (
+                log.rowid,
+                log.commit_sequence_id,
+                log.commit_result,
+                log.applied_epoch_number,
+                log.commit_type,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let process_result = alix_group
+        .sync_until_intent_resolved(membership_removal_intent.id)
+        .await;
+    assert_ok!(process_result);
+
+    let processed_intents_after = alix
+        .context
+        .db()
+        .find_group_intents(
+            alix_group.clone().group_id,
+            Some(vec![IntentState::Processed]),
+            None,
+        )
+        .unwrap();
+    let membership_removal_intent_after = processed_intents_after
+        .iter()
+        .find(|intent| intent.id == membership_removal_intent.id)
+        .unwrap();
+    assert_eq!(membership_removal_intent_after.state, IntentState::Processed);
+    assert_eq!(
+        (
+            membership_removal_intent_after.sequence_id,
+            membership_removal_intent_after.originator_id
+        ),
+        membership_removal_cursor
+    );
+
+    let unresolved_intents = alix
+        .context
+        .db()
+        .find_group_intents(
+            alix_group.clone().group_id,
+            Some(vec![
+                IntentState::ToPublish,
+                IntentState::Published,
+                IntentState::Committed,
+                IntentState::Error,
+            ]),
+            None,
+        )
+        .unwrap();
+    assert!(unresolved_intents.is_empty());
+
+    let members_after = alix_group.members().await.unwrap();
+    assert_eq!(members_after.len(), 2);
+    assert!(members_after.iter().any(|member| member.inbox_id == alix.inbox_id()));
+    assert!(members_after.iter().any(|member| member.inbox_id == bo.inbox_id()));
+    assert!(
+        !members_after
+            .iter()
+            .any(|member| member.inbox_id == charlie.inbox_id())
+    );
+
+    let membership_updates_after = alix_group
+        .find_messages(&MsgQueryArgs {
+            content_types: Some(vec![ContentType::GroupUpdated]),
+            ..Default::default()
+        })
+        .unwrap()
+        .into_iter()
+        .map(|message| message.id)
+        .collect::<Vec<_>>();
+    assert_eq!(membership_updates_after, membership_updates_before);
+
+    let commit_log_after = alix_group
+        .local_commit_log()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|log| {
+            (
+                log.rowid,
+                log.commit_sequence_id,
+                log.commit_result,
+                log.applied_epoch_number,
+                log.commit_type,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(commit_log_after, commit_log_before);
+}
+
+#[xmtp_common::test]
 async fn external_application_sync_is_idempotent() {
     tester!(alix);
     tester!(bo);
