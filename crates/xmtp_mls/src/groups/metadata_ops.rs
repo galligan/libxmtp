@@ -10,7 +10,7 @@ use xmtp_cryptography::Secret;
 use xmtp_db::{
     DbQuery, NotFound,
     consent_record::{ConsentState, StoredConsentRecord},
-    group::ConversationType,
+    group::{ConversationType, DmIdExt},
     prelude::{QueryConsentRecord, QueryGroup, QueryGroupVersion},
 };
 use xmtp_mls_common::group_mutable_metadata::{
@@ -355,6 +355,9 @@ where
     /// Find the `consent_state` of the group
     pub fn consent_state(&self) -> Result<ConsentState, GroupError> {
         let conn = self.context.db();
+        let stored_group = conn
+            .find_group(&self.group_id)?
+            .ok_or_else(|| NotFound::GroupById(self.group_id.clone()))?;
         let record = conn.get_consent_record(
             hex::encode(self.group_id.clone()),
             xmtp_db::consent_record::ConsentType::ConversationId,
@@ -362,6 +365,18 @@ where
 
         match record {
             Some(rec) => Ok(rec.state),
+            None if stored_group.conversation_type == ConversationType::Dm => Ok(stored_group
+                .dm_id
+                .map(|dm_id| {
+                    conn.get_consent_record(
+                        dm_id.other_inbox_id(self.context.inbox_id()),
+                        xmtp_db::consent_record::ConsentType::InboxId,
+                    )
+                })
+                .transpose()?
+                .flatten()
+                .map(|record| record.state)
+                .unwrap_or(ConsentState::Unknown)),
             None => Ok(ConsentState::Unknown),
         }
     }
@@ -384,11 +399,31 @@ where
     #[tracing::instrument(skip_all, level = "trace")]
     pub fn update_consent_state(&self, state: ConsentState) -> Result<(), GroupError> {
         let db = self.context.db();
-        let new_records: Vec<crate::worker::device_sync::preference_sync::PreferenceUpdate> = self
-            .quietly_update_consent_state(state, &db)?
-            .into_iter()
-            .map(crate::worker::device_sync::preference_sync::PreferenceUpdate::Consent)
-            .collect();
+        let mut changed_records = self.quietly_update_consent_state(state, &db)?;
+
+        if let Some(dm_id) = db
+            .find_group(&self.group_id)?
+            .and_then(|group| {
+                (group.conversation_type == ConversationType::Dm)
+                    .then_some(group.dm_id)
+                    .flatten()
+            })
+        {
+            let inbox_consent = StoredConsentRecord::new(
+                xmtp_db::consent_record::ConsentType::InboxId,
+                state,
+                dm_id.other_inbox_id(self.context.inbox_id()),
+            );
+            changed_records.extend(
+                db.insert_or_replace_consent_records(std::slice::from_ref(&inbox_consent))?,
+            );
+        }
+
+        let new_records: Vec<crate::worker::device_sync::preference_sync::PreferenceUpdate> =
+            changed_records
+                .into_iter()
+                .map(crate::worker::device_sync::preference_sync::PreferenceUpdate::Consent)
+                .collect();
 
         if !new_records.is_empty() {
             // Dispatch an update event so it can be synced across devices
@@ -397,7 +432,9 @@ where
             );
             // Broadcast the changes
             let _ = self.context.local_events().send(
-                crate::subscriptions::LocalEvents::PreferencesChanged(new_records),
+                crate::subscriptions::LocalEvents::PreferencesChanged(
+                    crate::subscriptions::preference_updates_event(&self.context, new_records),
+                ),
             );
         }
 
