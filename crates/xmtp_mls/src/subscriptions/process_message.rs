@@ -230,4 +230,40 @@ mod tests {
             assert!(processed.unwrap().message.is_some())
         }
     }
+
+    #[xmtp_common::test]
+    pub async fn test_group_paused_stream_error_triggers_recovery_sync() {
+        use xmtp_common::Generate as _;
+        use xmtp_proto::types::GroupId;
+
+        let current_message = generate_message(55, &GroupId::generate());
+        let mut mock_syncer = MockSync::new();
+        let mut mock_db = MockGroupDatabase::new();
+        let oid = current_message.originator_id();
+
+        mock_db
+            .expect_last_cursor()
+            .times(1)
+            .returning(move |_| Ok(Cursor::new(50, oid).into()));
+        mock_db.expect_msg().times(1).returning(|_, _| Ok(None));
+
+        mock_syncer.expect_process().times(1).returning(|_| {
+            Err(SubscribeError::ReceiveGroup(Box::new(
+                GroupMessageProcessingError::GroupPaused,
+            )))
+        });
+        mock_syncer
+            .expect_recover()
+            .times(1)
+            .returning(|_| crate::groups::summary::SyncSummary::default());
+
+        let processed = MessageProcessor::new(mock_syncer, mock_db)
+            .process(current_message.clone())
+            .await
+            .unwrap();
+
+        assert!(processed.message.is_none());
+        assert_eq!(processed.next_message, current_message.cursor);
+        assert_eq!(processed.tried_to_process, current_message.cursor);
+    }
 }
