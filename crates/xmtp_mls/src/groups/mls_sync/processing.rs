@@ -798,20 +798,7 @@ where
                 })?;
 
             if let Some((_, payload)) = &msg {
-                log_event!(
-                    Event::MLSProcessedStagedCommit,
-                    self.context.installation_id(),
-                    group_id = self.group_id,
-                    epoch = mls_group.epoch().as_u64(),
-                    epoch_auth = mls_group.epoch_authenticator().as_slice(),
-                    actor_installation_id = validated_commit.actor.installation_id,
-                    added_inboxes = $payload.added_inboxes,
-                    removed_inboxes = $payload.removed_inboxes,
-                    left_inboxes = $payload.left_inboxes,
-                    metadata_changes = $payload.metadata_field_changes,
-                    cursor = cursor.sequence_id,
-                    originator = cursor.originator_id
-                );
+                self.log_processed_staged_commit(mls_group, &validated_commit, payload, *cursor);
             }
 
             return Ok(msg.map(|(m, _)| m.id));
@@ -1108,19 +1095,14 @@ where
                     Self::get_message_expire_at_ns(mls_group),
                     storage,
                 )?;
-                identifier.internal_id(message.id.clone());
-                self.defer_sync_group_message_event_if_needed(
+                self.finalize_external_application_message(
+                    mls_group,
+                    &message,
                     sender_inbox_id,
                     storage,
                     deferred_events,
+                    identifier,
                 )?;
-                if message.content_type == ContentType::LeaveRequest {
-                    self.process_leave_request_message(mls_group, storage, &message)?;
-                }
-
-                if message.content_type == ContentType::DeleteMessage {
-                    self.process_delete_message(mls_group, storage, &message)?;
-                }
 
                 Ok(())
             }
@@ -1131,6 +1113,29 @@ where
             }
             None => Err(GroupMessageProcessingError::InvalidPayload),
         }
+    }
+
+    fn finalize_external_application_message(
+        &self,
+        mls_group: &OpenMlsGroup,
+        message: &StoredGroupMessage,
+        sender_inbox_id: &str,
+        storage: &impl XmtpMlsStorageProvider,
+        deferred_events: &mut DeferredEvents,
+        identifier: &mut MessageIdentifierBuilder,
+    ) -> Result<(), GroupMessageProcessingError> {
+        identifier.internal_id(message.id.clone());
+        self.defer_sync_group_message_event_if_needed(sender_inbox_id, storage, deferred_events)?;
+
+        if message.content_type == ContentType::LeaveRequest {
+            self.process_leave_request_message(mls_group, storage, message)?;
+        }
+
+        if message.content_type == ContentType::DeleteMessage {
+            self.process_delete_message(mls_group, storage, message)?;
+        }
+
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1182,21 +1187,7 @@ where
 
         if let Some((msg, payload)) = transcript {
             identifier.internal_id(msg.id);
-
-            log_event!(
-                Event::MLSProcessedStagedCommit,
-                self.context.installation_id(),
-                group_id = self.group_id,
-                epoch = mls_group.epoch().as_u64(),
-                epoch_auth = mls_group.epoch_authenticator().as_slice(),
-                actor_installation_id = validated_commit.actor.installation_id,
-                added_inboxes = $payload.added_inboxes,
-                removed_inboxes = $payload.removed_inboxes,
-                left_inboxes = $payload.left_inboxes,
-                metadata_changes = $payload.metadata_field_changes,
-                cursor = cursor.sequence_id,
-                originator = cursor.originator_id
-            );
+            self.log_processed_staged_commit(mls_group, &validated_commit, &payload, cursor);
         }
 
         Ok(())

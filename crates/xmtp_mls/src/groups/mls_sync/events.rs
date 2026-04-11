@@ -80,6 +80,29 @@ impl<Context> MlsGroup<Context>
 where
     Context: XmtpSharedContext,
 {
+    pub(super) fn log_processed_staged_commit(
+        &self,
+        mls_group: &OpenMlsGroup,
+        validated_commit: &ValidatedCommit,
+        payload: &GroupUpdated,
+        cursor: Cursor,
+    ) {
+        log_event!(
+            Event::MLSProcessedStagedCommit,
+            self.context.installation_id(),
+            group_id = self.group_id,
+            epoch = mls_group.epoch().as_u64(),
+            epoch_auth = mls_group.epoch_authenticator().as_slice(),
+            actor_installation_id = validated_commit.actor.installation_id,
+            added_inboxes = $payload.added_inboxes,
+            removed_inboxes = $payload.removed_inboxes,
+            left_inboxes = $payload.left_inboxes,
+            metadata_changes = $payload.metadata_field_changes,
+            cursor = cursor.sequence_id,
+            originator = cursor.originator_id
+        );
+    }
+
     pub(super) fn defer_sync_group_message_event_if_needed(
         &self,
         sender_inbox_id: &str,
