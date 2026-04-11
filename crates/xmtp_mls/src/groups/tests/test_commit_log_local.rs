@@ -270,8 +270,10 @@ async fn test_commit_log_non_retriable_error() {
     b.update_group_name("bar".to_string()).await?;
     a.sync().await?;
     b.sync().await?;
+    let a_logs_after_recovery = a.local_commit_log().await?;
+    let b_logs_after_recovery = b.local_commit_log().await?;
     assert_eq!(
-        get_type(&a.local_commit_log().await?),
+        get_type(&a_logs_after_recovery),
         &[
             &Some("GroupCreation".to_string()),
             &Some("UpdateGroupMembership".to_string()),
@@ -281,7 +283,7 @@ async fn test_commit_log_non_retriable_error() {
         ]
     );
     assert_eq!(
-        get_result(&a.local_commit_log().await?),
+        get_result(&a_logs_after_recovery),
         &[
             &CommitResult::Success,
             &CommitResult::Success,
@@ -291,7 +293,7 @@ async fn test_commit_log_non_retriable_error() {
         ]
     );
     assert_eq!(
-        get_type(&b.local_commit_log().await?),
+        get_type(&b_logs_after_recovery),
         &[
             &Some("Welcome".to_string()),
             &Some("MetadataUpdate".to_string()),
@@ -300,14 +302,36 @@ async fn test_commit_log_non_retriable_error() {
         ]
     );
     assert_eq!(
-        get_result(&b.local_commit_log().await?),
+        get_result(&b_logs_after_recovery),
         &[
             &CommitResult::Success,
             &CommitResult::Success,
             &CommitResult::WrongEpoch,
             &CommitResult::Success
         ]
-    )
+    );
+
+    a.sync().await?;
+    b.sync().await?;
+
+    let a_logs_after_resync = a.local_commit_log().await?;
+    let b_logs_after_resync = b.local_commit_log().await?;
+    assert_eq!(
+        get_type(&a_logs_after_resync),
+        get_type(&a_logs_after_recovery)
+    );
+    assert_eq!(
+        get_result(&a_logs_after_resync),
+        get_result(&a_logs_after_recovery)
+    );
+    assert_eq!(
+        get_type(&b_logs_after_resync),
+        get_type(&b_logs_after_recovery)
+    );
+    assert_eq!(
+        get_result(&b_logs_after_resync),
+        get_result(&b_logs_after_recovery)
+    );
 }
 
 fn get_type(logs: &[LocalCommitLog]) -> Vec<&Option<String>> {
