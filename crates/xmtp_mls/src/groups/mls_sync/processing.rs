@@ -287,7 +287,7 @@ where
     {
         let mut processed_message = None;
 
-        // TXN-EDGE: external message preflight + forced MLS reload - unresolved (intentional rollback before durable apply)
+        // TXN-EDGE: external message preflight + forced MLS reload - protocol-required (intentional rollback before durable apply)
         let result = provider.key_store().transaction(|conn| {
             let storage = conn.key_store();
             let provider = XmtpOpenMlsProvider::new(storage);

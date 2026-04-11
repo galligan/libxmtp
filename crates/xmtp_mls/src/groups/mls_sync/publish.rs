@@ -112,7 +112,7 @@ where
                             .last()
                             .ok_or(GroupError::UninitializedResult)?;
                         let intent_hash = sha256(last_payload);
-                        // TXN-EDGE: intent published state + staged MLS commit snapshot — unresolved
+                        // TXN-EDGE: intent published state + staged MLS commit snapshot — protocol-required
                         // removing this transaction causes missed messages
                         self.context.mls_storage().transaction(|conn| {
                             let storage = conn.key_store();

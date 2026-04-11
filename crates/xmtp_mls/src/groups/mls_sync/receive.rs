@@ -16,7 +16,7 @@ where
     {
         let db = provider.key_store().db();
 
-        // TXN-EDGE: non-retryable cursor advancement + failed-commit accounting - unresolved
+        // TXN-EDGE: non-retryable cursor advancement + failed-commit accounting - co-location convenience
         // TODO(rich): Add log_err! macro/trait for swallowing errors
         if let Err(update_cursor_error) = self.maybe_update_cursor(&db, envelope) {
             // We don't need to propagate the error if the cursor fails to update - the worst case is
