@@ -3602,6 +3602,11 @@ async fn skip_already_processed_intents() {
         .unwrap();
     let send_intent_cursor = (send_intent.sequence_id, send_intent.originator_id);
     let messages_before = bo_group.find_messages(&MsgQueryArgs::default()).unwrap();
+    let send_delivery_before = messages_before
+        .iter()
+        .find(|message| message.decrypted_message_bytes == vec![2])
+        .map(|message| message.delivery_status)
+        .unwrap();
     let commit_log_before = bo_group
         .local_commit_log()
         .await
@@ -3683,6 +3688,13 @@ async fn skip_already_processed_intents() {
             .map(|message| message.id.clone())
             .collect::<Vec<_>>()
     );
+    let send_delivery_after = messages_after
+        .iter()
+        .find(|message| message.decrypted_message_bytes == vec![2])
+        .map(|message| message.delivery_status)
+        .unwrap();
+    assert_eq!(send_delivery_before, DeliveryStatus::Published);
+    assert_eq!(send_delivery_after, DeliveryStatus::Published);
 
     let commit_log_after = bo_group
         .local_commit_log()
@@ -3700,6 +3712,83 @@ async fn skip_already_processed_intents() {
         })
         .collect::<Vec<_>>();
     assert_eq!(commit_log_after, commit_log_before);
+}
+
+#[xmtp_common::test]
+async fn external_leave_request_sync_is_idempotent() {
+    tester!(amal);
+    tester!(bola);
+
+    let amal_group = amal.create_group(None, None).unwrap();
+    amal_group.add_members(&[bola.inbox_id()]).await.unwrap();
+
+    amal_group.sync().await.unwrap();
+    bola.sync_welcomes().await.unwrap();
+
+    let bola_groups = bola.find_groups(GroupQueryArgs::default()).unwrap();
+    let bola_group = bola_groups.first().unwrap();
+    bola_group.sync().await.unwrap();
+
+    let transcript_ids = |group: &TestMlsGroup| {
+        group
+            .find_messages(&MsgQueryArgs::default())
+            .unwrap()
+            .into_iter()
+            .map(|message| message.id)
+            .collect::<Vec<_>>()
+    };
+
+    let transcript_ids_before = transcript_ids(&amal_group);
+    assert!(amal
+        .db()
+        .get_pending_remove_users(&amal_group.group_id)
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        amal_group.membership_state().unwrap(),
+        GroupMembershipState::Allowed
+    );
+
+    bola_group.leave_group().await.unwrap();
+    amal_group.sync().await.unwrap();
+
+    let pending_remove_after_first_sync = amal
+        .db()
+        .get_pending_remove_users(&amal_group.group_id)
+        .unwrap();
+    assert_eq!(pending_remove_after_first_sync.len(), 1);
+    assert!(pending_remove_after_first_sync.contains(&bola.inbox_id().to_string()));
+    assert_eq!(
+        amal_group.membership_state().unwrap(),
+        GroupMembershipState::Allowed
+    );
+
+    let transcript_ids_after_first_sync = transcript_ids(&amal_group);
+    assert_eq!(
+        transcript_ids_after_first_sync.len(),
+        transcript_ids_before.len() + 1
+    );
+
+    amal_group.sync().await.unwrap();
+
+    let pending_remove_after_second_sync = amal
+        .db()
+        .get_pending_remove_users(&amal_group.group_id)
+        .unwrap();
+    assert_eq!(
+        pending_remove_after_second_sync,
+        pending_remove_after_first_sync
+    );
+    assert_eq!(
+        amal_group.membership_state().unwrap(),
+        GroupMembershipState::Allowed
+    );
+
+    let transcript_ids_after_second_sync = transcript_ids(&amal_group);
+    assert_eq!(
+        transcript_ids_after_second_sync,
+        transcript_ids_after_first_sync
+    );
 }
 
 #[xmtp_common::test]
