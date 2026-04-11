@@ -268,6 +268,43 @@ where
         Ok(Some((msg, payload)))
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn persist_external_application_message(
+        &self,
+        decrypted_message_bytes: Vec<u8>,
+        envelope_timestamp_ns: i64,
+        cursor: Cursor,
+        sender_installation_id: &[u8],
+        sender_inbox_id: &str,
+        content_type: QueryableContentFields,
+        message_id: Vec<u8>,
+        expire_at_ns: Option<i64>,
+        storage: &impl XmtpMlsStorageProvider,
+    ) -> Result<StoredGroupMessage, GroupMessageProcessingError> {
+        let message = StoredGroupMessage {
+            id: message_id,
+            group_id: self.group_id.clone(),
+            decrypted_message_bytes,
+            sent_at_ns: envelope_timestamp_ns,
+            kind: GroupMessageKind::Application,
+            sender_installation_id: sender_installation_id.to_vec(),
+            sender_inbox_id: sender_inbox_id.to_string(),
+            delivery_status: DeliveryStatus::Published,
+            content_type: content_type.content_type,
+            version_major: content_type.version_major,
+            version_minor: content_type.version_minor,
+            authority_id: content_type.authority_id,
+            reference_id: content_type.reference_id,
+            sequence_id: cursor.sequence_id as i64,
+            originator_id: cursor.originator_id as i64,
+            expire_at_ns,
+            inserted_at_ns: 0,
+            should_push: true,
+        };
+        message.store_or_ignore(&storage.db())?;
+        Ok(message)
+    }
+
     fn apply_commit_metadata_mirror(
         &self,
         payload: &GroupUpdated,

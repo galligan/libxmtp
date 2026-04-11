@@ -75,3 +75,34 @@ pub(super) fn emit_message_deleted_event<Context>(
         LocalEvents::MessageDeleted(Box::new(decoded_message)),
     );
 }
+
+impl<Context> MlsGroup<Context>
+where
+    Context: XmtpSharedContext,
+{
+    pub(super) fn defer_sync_group_message_event_if_needed(
+        &self,
+        sender_inbox_id: &str,
+        storage: &impl XmtpMlsStorageProvider,
+        deferred_events: &mut DeferredEvents,
+    ) -> Result<(), GroupMessageProcessingError> {
+        if sender_inbox_id != self.context.inbox_id() {
+            return Ok(());
+        }
+
+        tracing::info!(
+            installation_id = hex::encode(self.context.installation_id()),
+            "new sync group message event"
+        );
+
+        if let Some(StoredGroup {
+            conversation_type: ConversationType::Sync,
+            ..
+        }) = storage.db().find_group(&self.group_id)?
+        {
+            deferred_events.add_worker_event(SyncWorkerEvent::NewSyncGroupMsg);
+        }
+
+        Ok(())
+    }
+}

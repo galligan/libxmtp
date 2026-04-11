@@ -1098,43 +1098,23 @@ where
             })) => {
                 let message_id = calculate_message_id(&self.group_id, &content, &idempotency_key);
                 let queryable_content_fields = Self::extract_queryable_content_fields(&content);
-
-                let message = StoredGroupMessage {
-                    id: message_id.clone(),
-                    group_id: self.group_id.clone(),
-                    decrypted_message_bytes: content,
-                    sent_at_ns: envelope_timestamp_ns,
-                    kind: GroupMessageKind::Application,
-                    sender_installation_id: sender_installation_id.to_vec(),
-                    sender_inbox_id: sender_inbox_id.to_string(),
-                    delivery_status: DeliveryStatus::Published,
-                    content_type: queryable_content_fields.content_type,
-                    version_major: queryable_content_fields.version_major,
-                    version_minor: queryable_content_fields.version_minor,
-                    authority_id: queryable_content_fields.authority_id,
-                    reference_id: queryable_content_fields.reference_id,
-                    sequence_id: cursor.sequence_id as i64,
-                    originator_id: cursor.originator_id as i64,
-                    expire_at_ns: Self::get_message_expire_at_ns(mls_group),
-                    inserted_at_ns: 0,
-                    should_push: true,
-                };
-                message.store_or_ignore(&storage.db())?;
-                identifier.internal_id(message_id);
-
-                if sender_inbox_id == self.context.inbox_id() {
-                    tracing::info!(
-                        installation_id = hex::encode(self.context.installation_id()),
-                        "new sync group message event"
-                    );
-                    if let Some(StoredGroup {
-                        conversation_type: ConversationType::Sync,
-                        ..
-                    }) = storage.db().find_group(&self.group_id)?
-                    {
-                        deferred_events.add_worker_event(SyncWorkerEvent::NewSyncGroupMsg);
-                    }
-                }
+                let message = self.persist_external_application_message(
+                    content,
+                    envelope_timestamp_ns,
+                    cursor,
+                    sender_installation_id,
+                    sender_inbox_id,
+                    queryable_content_fields,
+                    message_id,
+                    Self::get_message_expire_at_ns(mls_group),
+                    storage,
+                )?;
+                identifier.internal_id(message.id.clone());
+                self.defer_sync_group_message_event_if_needed(
+                    sender_inbox_id,
+                    storage,
+                    deferred_events,
+                )?;
                 if message.content_type == ContentType::LeaveRequest {
                     self.process_leave_request_message(mls_group, storage, &message)?;
                 }
