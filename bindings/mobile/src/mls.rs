@@ -67,13 +67,12 @@ use xmtp_mls::mls_common::group_mutable_metadata::MessageDisappearingSettings;
 use xmtp_mls::mls_common::group_mutable_metadata::MetadataField;
 use xmtp_mls::{
     Client as MlsClient, ConversationDebugInfo, GroupSyncSummary as XmtpGroupSyncSummary,
-    IdentityStrategy, MlsGroup, SqliteCursorStore, XmtpSharedContext,
-    apply_signature_request_with_verifier, get_creation_signature_kind,
+    IdentityStrategy, MlsGroup, PreconfiguredPolicies, SqliteCursorStore, UpdateAdminListType,
+    XmtpSharedContext, apply_signature_request_with_verifier, get_creation_signature_kind,
     inbox_addresses_with_verifier, revoke_installations_with_verifier,
 };
 use xmtp_mls::{
     groups::{
-        PreconfiguredPolicies, UpdateAdminListType,
         group_permissions::{
             BasePolicies, GroupMutablePermissions, GroupMutablePermissionsError,
             MembershipPolicies, MetadataBasePolicies, MetadataPolicies, PermissionsBasePolicies,
@@ -83,7 +82,7 @@ use xmtp_mls::{
         members::PermissionLevel,
     },
     subscriptions::SubscribeError,
-    worker::device_sync::preference_sync::PreferenceUpdate,
+    worker::device_sync::PreferenceUpdate,
 };
 use xmtp_proto::api::IsConnectedCheck;
 use xmtp_proto::api_client::AggregateStats;

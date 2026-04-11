@@ -1,4 +1,4 @@
-use xmtp_mls::builder::{ForkRecoveryOpts, ForkRecoveryPolicy};
+use xmtp_mls::{ForkRecoveryOpts, ForkRecoveryPolicy};
 
 #[derive(uniffi::Enum, Debug)]
 pub enum FfiForkRecoveryPolicy {

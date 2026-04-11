@@ -1,7 +1,7 @@
 use crate::{ErrorWrapper, conversation::Conversation};
 use napi::bindgen_prelude::{BigInt, Result};
 use napi_derive::napi;
-use xmtp_mls::groups::ConversationDebugInfo as XmtpConversationDebugInfo;
+use xmtp_mls::ConversationDebugInfo as XmtpConversationDebugInfo;
 use xmtp_proto::types::Cursor as XmtpCursor;
 
 #[napi(object)]

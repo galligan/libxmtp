@@ -42,6 +42,7 @@ pub(crate) mod sync_group;
 pub mod worker;
 
 pub use archive::insert_importer;
+pub use preference_sync::PreferenceUpdate;
 pub use worker::SyncMetric;
 pub use xmtp_archive::archive_options::{ArchiveOptions, BackupElementSelection};
 pub use xmtp_archive::exporter::ArchiveExporter;

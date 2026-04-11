@@ -4,7 +4,7 @@ use napi::{
   threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode},
 };
 use napi_derive::napi;
-use xmtp_mls::groups::MlsGroup;
+use xmtp_mls::MlsGroup;
 
 #[napi]
 impl Conversation {
