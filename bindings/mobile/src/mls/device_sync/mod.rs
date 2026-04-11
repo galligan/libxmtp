@@ -4,11 +4,8 @@ mod tests;
 use crate::{FfiError, FfiGroupSyncSummary, FfiXmtpClient};
 use xmtp_id::associations::DeserializationError;
 use xmtp_mls::worker::device_sync::{
-    ArchiveOptions, AvailableArchive, BackupElementSelection, DeviceSyncError,
-    archive::{
-        ArchiveImporter, BACKUP_VERSION, BackupMetadata, ENC_KEY_SIZE, exporter::ArchiveExporter,
-        insert_importer,
-    },
+    ArchiveExporter, ArchiveImporter, ArchiveOptions, AvailableArchive, BACKUP_VERSION,
+    BackupElementSelection, BackupMetadata, DeviceSyncError, ENC_KEY_SIZE, insert_importer,
 };
 use xmtp_proto::xmtp::device_sync::BackupElementSelection as BackupElementSelectionProto;
 

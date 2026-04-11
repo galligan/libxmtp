@@ -5,10 +5,8 @@ use napi_derive::napi;
 use std::sync::Arc;
 use xmtp_id::associations::DeserializationError;
 use xmtp_mls::worker::device_sync::{
-  ArchiveOptions as XmtpArchiveOptions, AvailableArchive, BackupElementSelection, DeviceSyncError,
-  archive::{
-    ArchiveImporter, BackupMetadata, ENC_KEY_SIZE, exporter::ArchiveExporter, insert_importer,
-  },
+  ArchiveExporter, ArchiveImporter, ArchiveOptions as XmtpArchiveOptions, AvailableArchive,
+  BackupElementSelection, BackupMetadata, DeviceSyncError, ENC_KEY_SIZE, insert_importer,
 };
 use xmtp_proto::xmtp::device_sync::BackupElementSelection as BackupElementSelectionProto;
 

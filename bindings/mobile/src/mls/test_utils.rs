@@ -6,7 +6,7 @@ use xmtp_common::{TestLogReplace, tmp_path};
 use xmtp_configuration::GrpcUrls;
 use xmtp_id::InboxOwner;
 use xmtp_mls::{
-    builder::DeviceSyncMode,
+    DeviceSyncMode,
     utils::{PasskeyUser, Tester, TesterBuilder},
 };
 
