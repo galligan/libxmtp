@@ -3649,6 +3649,63 @@ async fn skip_already_processed_intents() {
     );
 }
 
+#[xmtp_common::test]
+async fn external_group_update_sync_is_idempotent() {
+    tester!(alix);
+    tester!(bo);
+
+    let alix_group = alix.create_group(None, None).unwrap();
+    alix_group.add_members(&[bo.inbox_id()]).await.unwrap();
+
+    bo.sync_welcomes().await.unwrap();
+    let bo_groups = bo.find_groups(GroupQueryArgs::default()).unwrap();
+    let bo_group = bo_groups.first().unwrap();
+    bo_group.sync().await.unwrap();
+
+    let group_updates = || {
+        bo_group
+            .find_messages(&MsgQueryArgs {
+                content_types: Some(vec![ContentType::GroupUpdated]),
+                ..Default::default()
+            })
+            .unwrap()
+    };
+
+    let updates_before = group_updates();
+    let update_ids_before = updates_before
+        .iter()
+        .map(|message| message.id.clone())
+        .collect::<Vec<_>>();
+
+    alix_group
+        .update_group_name("metadata replay check".to_string())
+        .await
+        .unwrap();
+
+    bo_group.sync().await.unwrap();
+    assert_eq!(bo_group.group_name().unwrap(), "metadata replay check");
+
+    let updates_after_first_sync = group_updates();
+    let update_ids_after_first_sync = updates_after_first_sync
+        .iter()
+        .map(|message| message.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(updates_after_first_sync.len(), updates_before.len() + 1);
+    assert_ne!(update_ids_after_first_sync, update_ids_before);
+
+    bo_group.sync().await.unwrap();
+    assert_eq!(bo_group.group_name().unwrap(), "metadata replay check");
+
+    let updates_after_second_sync = group_updates();
+    assert_eq!(
+        updates_after_second_sync
+            .iter()
+            .map(|message| message.id.clone())
+            .collect::<Vec<_>>(),
+        update_ids_after_first_sync
+    );
+}
+
 #[xmtp_common::test(flavor = "multi_thread")]
 async fn test_parallel_syncs() {
     tester!(alix1, sync_worker);
