@@ -19,8 +19,8 @@ use crate::{
 use derive_builder::Builder;
 use openmls::group::MlsGroup as OpenMlsGroup;
 use prost::Message;
-use xmtp_common::RetryableError;
 use xmtp_common::time::now_ns;
+use xmtp_common::{MaybeSend, MaybeSync, RetryableError};
 use xmtp_configuration::Originators;
 use xmtp_content_types::ContentCodec;
 use xmtp_content_types::group_updated::GroupUpdatedCodec;
@@ -35,6 +35,7 @@ use xmtp_db::{
 use xmtp_mls_common::{
     group_metadata::extract_group_metadata, group_mutable_metadata::extract_group_mutable_metadata,
 };
+use xmtp_proto::types::InstallationId;
 use xmtp_proto::types::Cursor;
 use xmtp_proto::xmtp::mls::message_contents::{ContentTypeId, GroupUpdated, group_updated::Inbox};
 
@@ -90,6 +91,91 @@ impl<C> CommitResult<C> {
     }
 }
 
+trait WelcomeCursorContext: Clone + MaybeSend + MaybeSync {
+    fn installation_id(&self) -> InstallationId;
+}
+
+impl<Context> WelcomeCursorContext for Context
+where
+    Context: XmtpSharedContext,
+{
+    fn installation_id(&self) -> InstallationId {
+        XmtpSharedContext::installation_id(self)
+    }
+}
+
+fn last_welcome_sequence_id<Context>(
+    context: &Context,
+    db: &impl DbQuery,
+    welcome: &xmtp_proto::types::WelcomeMessage,
+) -> Result<i64, StorageError>
+where
+    Context: WelcomeCursorContext,
+{
+    let last = db.get_last_cursor_for_originator(
+        context.installation_id(),
+        EntityKind::Welcome,
+        welcome.originator_id(),
+    )?;
+    Ok(last.sequence_id as i64)
+}
+
+fn update_welcome_cursor<Context>(
+    context: &Context,
+    db: &impl DbQuery,
+    welcome: &xmtp_proto::types::WelcomeMessage,
+) -> Result<bool, StorageError>
+where
+    Context: WelcomeCursorContext,
+{
+    db.update_cursor(
+        context.installation_id(),
+        EntityKind::Welcome,
+        welcome.cursor,
+    )
+}
+
+fn load_processed_welcome_group<Context>(
+    context: &Context,
+    db: &impl DbQuery,
+    welcome: &xmtp_proto::types::WelcomeMessage,
+) -> Result<Option<MlsGroup<Context>>, GroupError>
+where
+    Context: XmtpSharedContext,
+{
+    if welcome.resuming() {
+        return Ok(None);
+    }
+
+    if last_welcome_sequence_id(context, db, welcome)? >= welcome.sequence_id() as i64 {
+        tracing::debug!(
+            welcome_id = %welcome.cursor,
+            "Welcome id is less than cursor, fetching from DB"
+        );
+        let maybe_group = db.find_group_by_sequence_id(welcome.cursor)?;
+        let Some(group) = maybe_group else {
+            tracing::warn!(
+                welcome_id = %welcome.cursor,
+                "Already processed welcome not found in DB, likely pre-existing group or oneshot message"
+            );
+            return Ok(None);
+        };
+
+        let group = MlsGroup::<_>::new(
+            context.clone(),
+            group.id,
+            group.dm_id,
+            group.conversation_type,
+            group.created_at_ns,
+        );
+
+        tracing::warn!("Skipping old welcome {}", welcome.cursor);
+        return Ok(Some(group));
+    }
+
+    Ok(None)
+}
+
 impl<'a, C, V> XmtpWelcomeBuilder<'a, C, V>
 where
     C: XmtpSharedContext,
@@ -99,7 +185,7 @@ where
     pub async fn process(self) -> Result<Option<MlsGroup<C>>, GroupError> {
         let mut this = self.build()?;
         let db = this.context.db();
-        if let Some(group) = this.check_if_processed(&db)? {
+        if let Some(group) = load_processed_welcome_group(&this.context, &db, this.welcome)? {
             return Ok(Some(group));
         }
 
@@ -109,7 +195,7 @@ where
                     "detected non-retryable error {e}, incrementing welcome cursor [{}]",
                     this.welcome.cursor
                 );
-                this.update_cursor(&db)?;
+                update_welcome_cursor(&this.context, &db, this.welcome)?;
                 return Err(e);
             }
             Err(e) => {
@@ -133,65 +219,6 @@ where
     V: ValidateGroupMembership,
     <C::MlsStorage as XmtpMlsStorageProvider>::Connection: xmtp_db::ConnectionExt,
 {
-    /// Get the last cursor in the database for welcomes
-    fn last_sequence_id(&self, db: &impl DbQuery) -> Result<i64, StorageError> {
-        let last = db.get_last_cursor_for_originator(
-            self.context.installation_id(),
-            EntityKind::Welcome,
-            self.welcome.originator_id(),
-        )?;
-        Ok(last.sequence_id as i64)
-    }
-
-    /// Update the cursor in the database
-    /// returns true if the cursor was updated, otherwise false.
-    fn update_cursor(&self, db: &impl DbQuery) -> Result<bool, StorageError> {
-        db.update_cursor(
-            self.context.installation_id(),
-            EntityKind::Welcome,
-            self.welcome.cursor,
-        )
-    }
-
-    /// Increment cursor only if the error is not retryable
-    /// Check if the welcome has already been processed
-    /// if the cursor of this welcome is less than the one we have in our local database,
-    /// we can safely return the local cached group as if we had processed it.
-    fn check_if_processed(&self, db: &impl DbQuery) -> Result<Option<MlsGroup<C>>, GroupError> {
-        if self.welcome.resuming() {
-            return Ok(None);
-        }
-        let context = &self.context;
-
-        // Check if this welcome was already processed. Return the existing group if so.
-        if self.last_sequence_id(db)? >= self.welcome.sequence_id() as i64 {
-            tracing::debug!(
-                welcome_id = %self.welcome.cursor,
-                "Welcome id is less than cursor, fetching from DB"
-            );
-            let maybe_group = db.find_group_by_sequence_id(self.welcome.cursor)?;
-            let Some(group) = maybe_group else {
-                tracing::warn!(
-                    welcome_id = %self.welcome.cursor,
-                    "Already processed welcome not found in DB, likely pre-existing group or oneshot message"
-                );
-                return Ok(None);
-            };
-
-            let group = MlsGroup::<_>::new(
-                context.clone(),
-                group.id,
-                group.dm_id,
-                group.conversation_type,
-                group.created_at_ns,
-            );
-
-            tracing::warn!("Skipping old welcome {}", self.welcome.cursor);
-            return Ok(Some(group));
-        };
-        Ok(None)
-    }
-
     /// Process the welcome without affecting persistent state.
     /// Return error if validation fails or if welcome was already processed.
     async fn validate_membership(&self, db: &impl DbQuery) -> Result<DecryptedWelcome, GroupError> {
@@ -262,7 +289,7 @@ where
             match result {
                 Err(err) if !err.is_retryable() && self.cursor_increment => {
                     tracing::warn!("welcome with cursor_id={} failed with a non-retryable error because of {err}, incrementing cursor", self.welcome.cursor);
-                    self.update_cursor(&db)?;
+                    update_welcome_cursor(&self.context, &db, self.welcome)?;
                     // return ok to commit the transaction
                     Ok(CommitResult::FailedForever(err))
                 },
@@ -303,8 +330,8 @@ where
         } = decrypted_welcome;
 
         tracing::debug!("calling update cursor for welcome {}", welcome.cursor);
-        let requires_processing =
-            welcome.resuming() || welcome.sequence_id() > self.last_sequence_id(&db)? as u64;
+        let requires_processing = welcome.resuming()
+            || welcome.sequence_id() > last_welcome_sequence_id(context, &db, welcome)? as u64;
         if !requires_processing {
             tracing::error!("Skipping already processed welcome {}", welcome.cursor);
             return Err(ProcessIntentError::WelcomeAlreadyProcessed(welcome.cursor).into());
