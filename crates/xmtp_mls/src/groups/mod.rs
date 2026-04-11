@@ -54,8 +54,8 @@ pub use xmtp_db::user_preferences::HmacKey;
 pub use xmtp_mls_common::group::{DMMetadataOptions, GroupMetadataOptions};
 pub use xmtp_proto::types::Cursor;
 
-pub use self::group_permissions::PreconfiguredPolicies;
 pub(crate) use self::group_permissions::PolicySet;
+pub use self::group_permissions::PreconfiguredPolicies;
 use crate::{GroupCommitLock, context::XmtpSharedContext};
 pub use error::*;
 use openmls::prelude::{GroupId, MlsGroup as OpenMlsGroup};
@@ -67,6 +67,7 @@ use xmtp_db::{
     XmtpMlsStorageProvider, group::ConversationType, group::StoredGroup,
     group_message::StoredGroupMessage,
 };
+use xmtp_proto::types::GlobalCursor;
 
 const MAX_GROUP_DESCRIPTION_LENGTH: usize = 1000;
 const MAX_GROUP_NAME_LENGTH: usize = 100;
@@ -90,6 +91,8 @@ pub struct MlsGroup<Context> {
     pub context: Context,
     mls_commit_lock: Arc<GroupCommitLock>,
     mutex: Arc<Mutex<()>>,
+    stream_seed_cursor: Option<GlobalCursor>,
+    stream_replay_after_ns: Option<i64>,
 }
 
 impl<C> std::hash::Hash for MlsGroup<C> {
@@ -142,6 +145,8 @@ impl<Context: XmtpSharedContext> Clone for MlsGroup<Context> {
             context: self.context.clone(),
             mutex: self.mutex.clone(),
             mls_commit_lock: self.mls_commit_lock.clone(),
+            stream_seed_cursor: self.stream_seed_cursor.clone(),
+            stream_replay_after_ns: self.stream_replay_after_ns,
         }
     }
 }
@@ -175,6 +180,8 @@ impl<Context: Clone> From<MlsGroup<&Context>> for MlsGroup<Context> {
             mls_commit_lock: group.mls_commit_lock,
             mutex: group.mutex,
             conversation_type: group.conversation_type,
+            stream_seed_cursor: group.stream_seed_cursor,
+            stream_replay_after_ns: group.stream_replay_after_ns,
         }
     }
 }
@@ -255,7 +262,27 @@ where
             mutex: mutexes.get_mutex(group_id),
             context: context.clone(),
             mls_commit_lock: Arc::clone(context.mls_commit_lock()),
+            stream_seed_cursor: None,
+            stream_replay_after_ns: None,
         }
+    }
+
+    pub(crate) fn with_stream_seed_cursor(mut self, cursor: Option<GlobalCursor>) -> Self {
+        self.stream_seed_cursor = cursor;
+        self
+    }
+
+    pub(crate) fn stream_seed_cursor(&self) -> Option<GlobalCursor> {
+        self.stream_seed_cursor.clone()
+    }
+
+    pub(crate) fn with_stream_replay_after_ns(mut self, replay_after_ns: Option<i64>) -> Self {
+        self.stream_replay_after_ns = replay_after_ns;
+        self
+    }
+
+    pub(crate) fn stream_replay_after_ns(&self) -> Option<i64> {
+        self.stream_replay_after_ns
     }
 
     // Load the stored OpenMLS group from the OpenMLS provider's keystore
