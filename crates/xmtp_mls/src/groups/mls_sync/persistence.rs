@@ -269,6 +269,39 @@ where
         Ok(Some((msg, payload)))
     }
 
+    pub(super) fn finalize_applied_staged_commit(
+        &self,
+        mls_group: &OpenMlsGroup,
+        validated_commit: &ValidatedCommit,
+        timestamp_ns: u64,
+        cursor: Cursor,
+        storage: &impl XmtpMlsStorageProvider,
+    ) -> Result<Option<(StoredGroupMessage, GroupUpdated)>, GroupMessageProcessingError> {
+        Self::mark_readd_requests_as_responded(
+            storage,
+            &self.group_id,
+            &validated_commit.readded_installations,
+            cursor.sequence_id as i64,
+        )?;
+
+        let transcript =
+            self.save_transcript_message(validated_commit.clone(), timestamp_ns, cursor, storage)?;
+
+        // remove left/removed members from the pending_remove list
+        self.clean_pending_remove_list(storage, &validated_commit.removed_inboxes);
+
+        // Handle super_admin status changes for the current user
+        // If promoted: check for pending remove members and mark group accordingly
+        // If demoted: clear the pending leave request status
+        self.handle_super_admin_status_change(
+            storage,
+            mls_group,
+            &validated_commit.metadata_validation_info,
+        );
+
+        Ok(transcript)
+    }
+
     pub(super) fn update_already_exists(
         &self,
         payload: &GroupUpdated,

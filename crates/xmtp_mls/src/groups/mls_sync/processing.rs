@@ -746,21 +746,10 @@ where
                     next_intent_state: IntentState::ToPublish,
                 });
             }
-            Self::mark_readd_requests_as_responded(
-                storage,
-                &self.group_id,
-                &validated_commit.readded_installations,
-                cursor.sequence_id as i64,
-            )
-            .map_err(|err| IntentResolutionError {
-                processing_error: err.into(),
-                next_intent_state: IntentState::Error,
-            })?;
-
-            // If no error committing the change, write a transcript message
             let msg = self
-                .save_transcript_message(
-                    validated_commit.clone(),
+                .finalize_applied_staged_commit(
+                    mls_group,
+                    &validated_commit,
                     envelope_timestamp_ns as u64,
                     *cursor,
                     storage,
@@ -771,16 +760,6 @@ where
                     // will be missing. We mark the intent state as errored and continue.
                     next_intent_state: IntentState::Error,
                 })?;
-
-            // Clean up pending_remove list for removed members
-            self.clean_pending_remove_list(storage, &validated_commit.removed_inboxes);
-
-            // Handle super_admin status changes
-            self.handle_super_admin_status_change(
-                storage,
-                mls_group,
-                &validated_commit.metadata_validation_info,
-            );
 
             if let Some((_, payload)) = &msg {
                 log_event!(
@@ -1120,31 +1099,13 @@ where
                     cursor.sequence_id as i64,
                 )?;
 
-                Self::mark_readd_requests_as_responded(
-                    storage,
-                    &self.group_id,
-                    &validated_commit.readded_installations,
-                    cursor.sequence_id as i64,
-                )?;
-
-                let transcript = self.save_transcript_message(
-                    validated_commit.clone(),
+                let transcript = self.finalize_applied_staged_commit(
+                    mls_group,
+                    &validated_commit,
                     envelope_timestamp_ns as u64,
                     *cursor,
                     storage,
                 )?;
-
-                // remove left/removed members from the pending_remove list
-                self.clean_pending_remove_list(storage, &validated_commit.removed_inboxes);
-
-                // Handle super_admin status changes for the current user
-                // If promoted: check for pending remove members and mark group accordingly
-                // If demoted: clear the pending leave request status
-                self.handle_super_admin_status_change(
-                    storage,
-                    mls_group,
-                    &validated_commit.metadata_validation_info,
-                );
 
                 if let Some((msg, payload)) = transcript {
                     identifier.internal_id(msg.id);
