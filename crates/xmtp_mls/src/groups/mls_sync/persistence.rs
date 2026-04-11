@@ -236,8 +236,7 @@ where
             }
         });
 
-        // TXN-EDGE: mirrored metadata updates + transcript persistence - unresolved
-        self.handle_metadata_update_from_commit(&payload.metadata_field_changes, storage)?;
+        self.apply_commit_metadata_mirror(&payload, storage)?;
 
         // When a DM is stitched, it can repeat group updates. We want to prevent saving those messages.
         if self.update_already_exists(&payload, storage)? {
@@ -267,6 +266,18 @@ where
 
         msg.store_or_ignore(&storage.db())?;
         Ok(Some((msg, payload)))
+    }
+
+    fn apply_commit_metadata_mirror(
+        &self,
+        payload: &GroupUpdated,
+        storage: &impl XmtpMlsStorageProvider,
+    ) -> Result<(), StorageError> {
+        // TXN-EDGE: mirrored metadata updates + transcript persistence - co-location convenience
+        //
+        // Metadata mirrors are derived from the validated commit itself and must still be
+        // applied even when DM stitching later dedupes the transcript message.
+        self.handle_metadata_update_from_commit(&payload.metadata_field_changes, storage)
     }
 
     pub(super) fn finalize_applied_staged_commit(

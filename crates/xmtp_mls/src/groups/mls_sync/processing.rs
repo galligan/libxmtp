@@ -2,6 +2,7 @@ use super::*;
 use crate::groups::check_proposals_enabled;
 use crate::groups::validated_commit::CommitValidationContext;
 use crate::identity_updates::IdentityStateContext;
+use openmls::prelude::ApplicationMessage;
 use xmtp_proto::types::{Cursor, InstallationId};
 
 async fn validate_staged_commit<Context>(
@@ -969,89 +970,20 @@ where
         let mut identifier = MessageIdentifierBuilder::from(message_envelope);
         match processed_message.into_content() {
             ProcessedMessageContent::ApplicationMessage(application_message) => {
-                log_event!(
-                    Event::MLSReceivedApplicationMessage,
-                    self.context.installation_id(),
-                    inbox_id = self.context.inbox_id(),
-                    sender_inbox_id,
-                    sender_installation_id,
-                    group_id = self.group_id,
-                    epoch = mls_group.epoch().as_u64(),
+                self.process_external_application_message(
+                    mls_group,
+                    application_message,
+                    envelope_timestamp_ns,
+                    *cursor,
                     msg_epoch,
-                    msg_group_id,
-                    cursor = %cursor,
-                );
-                let message_bytes = application_message.into_bytes();
-
-                let mut bytes = Bytes::from(message_bytes);
-                let envelope = PlaintextEnvelope::decode(&mut bytes)?;
-
-                match envelope.content {
-                    Some(Content::V1(V1 {
-                        idempotency_key,
-                        content,
-                    })) => {
-                        let message_id =
-                            calculate_message_id(&self.group_id, &content, &idempotency_key);
-                        let queryable_content_fields =
-                            Self::extract_queryable_content_fields(&content);
-
-                        let message = StoredGroupMessage {
-                            id: message_id.clone(),
-                            group_id: self.group_id.clone(),
-                            decrypted_message_bytes: content,
-                            sent_at_ns: envelope_timestamp_ns,
-                            kind: GroupMessageKind::Application,
-                            sender_installation_id,
-                            sender_inbox_id: sender_inbox_id.clone(),
-                            delivery_status: DeliveryStatus::Published,
-                            content_type: queryable_content_fields.content_type,
-                            version_major: queryable_content_fields.version_major,
-                            version_minor: queryable_content_fields.version_minor,
-                            authority_id: queryable_content_fields.authority_id,
-                            reference_id: queryable_content_fields.reference_id,
-                            sequence_id: cursor.sequence_id as i64,
-                            originator_id: cursor.originator_id as i64,
-                            expire_at_ns: Self::get_message_expire_at_ns(mls_group),
-                            inserted_at_ns: 0, // Will be set by database
-                            should_push: true,
-                        };
-                        message.store_or_ignore(&storage.db())?;
-                        identifier.internal_id(message_id);
-
-                        // If this message was sent by us on another installation, check if it
-                        // belongs to a sync group, and if it is - notify the worker.
-                        if sender_inbox_id == self.context.inbox_id() {
-                            tracing::info!(
-                                installation_id = hex::encode(self.context.installation_id()),
-                                "new sync group message event"
-                            );
-                            if let Some(StoredGroup {
-                                conversation_type: ConversationType::Sync,
-                                ..
-                            }) = storage.db().find_group(&self.group_id)?
-                            {
-                                // Send this event after the transaction completes
-                                deferred_events.add_worker_event(SyncWorkerEvent::NewSyncGroupMsg);
-                            }
-                        }
-                        if message.content_type == ContentType::LeaveRequest {
-                            self.process_leave_request_message(mls_group, storage, &message)?;
-                        }
-
-                        if message.content_type == ContentType::DeleteMessage {
-                            self.process_delete_message(mls_group, storage, &message)?;
-                        }
-
-                        Ok::<_, GroupMessageProcessingError>(())
-                    }
-                    Some(Content::V2(V2 { .. })) => {
-                        // V2 was used for DeviceSync V1, which is now removed.
-                        // Device Sync V2 reverted back to using V1 envelopes.
-                        Ok::<_, GroupMessageProcessingError>(())
-                    }
-                    None => Err(GroupMessageProcessingError::InvalidPayload),
-                }
+                    &msg_group_id,
+                    &sender_inbox_id,
+                    &sender_installation_id,
+                    storage,
+                    deferred_events,
+                    &mut identifier,
+                )?;
+                Ok::<_, GroupMessageProcessingError>(())
             }
             ProcessedMessageContent::ProposalMessage(proposal_ptr) => {
                 tracing::debug!(
@@ -1072,64 +1004,188 @@ where
                 // intentionally left blank.
             }
             ProcessedMessageContent::StagedCommitMessage(staged_commit) => {
-                let staged_commit = *staged_commit;
-                let validated_commit =
-                    validated_commit.expect("Needs to be present when this is a staged commit");
-
-                log_event!(
-                    Event::MLSReceivedStagedCommit,
-                    self.context.installation_id(),
-                    inbox_id = self.context.inbox_id(),
-                    sender_inbox = sender_inbox_id,
-                    sender_installation_id,
-                    group_id = self.group_id,
-                    epoch = mls_group.epoch().as_u64(),
-                    msg_epoch,
-                    msg_group_id,
-                    cursor = %cursor,
-                    hash = #message_envelope.payload_hash
-                );
-
-                identifier.group_context(staged_commit.group_context().clone());
-
-                mls_group.merge_staged_commit_logged(
-                    &XmtpOpenMlsProviderRef::new(storage),
-                    staged_commit,
-                    &validated_commit,
-                    cursor.sequence_id as i64,
-                )?;
-
-                let transcript = self.finalize_applied_staged_commit(
+                self.process_external_staged_commit_message(
                     mls_group,
-                    &validated_commit,
-                    envelope_timestamp_ns as u64,
+                    *staged_commit,
+                    validated_commit.expect("Needs to be present when this is a staged commit"),
+                    message_envelope,
                     *cursor,
+                    envelope_timestamp_ns,
+                    sender_inbox_id,
+                    sender_installation_id,
+                    msg_epoch,
+                    &msg_group_id,
                     storage,
+                    &mut identifier,
                 )?;
+                Ok::<_, GroupMessageProcessingError>(())
+            }
+        }?;
+        identifier.build()
+    }
 
-                if let Some((msg, payload)) = transcript {
-                    identifier.internal_id(msg.id);
+    #[allow(clippy::too_many_arguments)]
+    fn process_external_application_message(
+        &self,
+        mls_group: &OpenMlsGroup,
+        application_message: ApplicationMessage,
+        envelope_timestamp_ns: i64,
+        cursor: Cursor,
+        msg_epoch: u64,
+        msg_group_id: &[u8],
+        sender_inbox_id: &str,
+        sender_installation_id: &[u8],
+        storage: &impl XmtpMlsStorageProvider,
+        deferred_events: &mut DeferredEvents,
+        identifier: &mut MessageIdentifierBuilder,
+    ) -> Result<(), GroupMessageProcessingError> {
+        log_event!(
+            Event::MLSReceivedApplicationMessage,
+            self.context.installation_id(),
+            inbox_id = self.context.inbox_id(),
+            sender_inbox_id,
+            sender_installation_id,
+            group_id = self.group_id,
+            epoch = mls_group.epoch().as_u64(),
+            msg_epoch,
+            msg_group_id,
+            cursor = %cursor,
+        );
+        let message_bytes = application_message.into_bytes();
 
-                    log_event!(
-                        Event::MLSProcessedStagedCommit,
-                        self.context.installation_id(),
-                        group_id = self.group_id,
-                        epoch = mls_group.epoch().as_u64(),
-                        epoch_auth = mls_group.epoch_authenticator().as_slice(),
-                        actor_installation_id = validated_commit.actor.installation_id,
-                        added_inboxes = $payload.added_inboxes,
-                        removed_inboxes = $payload.removed_inboxes,
-                        left_inboxes = $payload.left_inboxes,
-                        metadata_changes = $payload.metadata_field_changes,
-                        cursor = cursor.sequence_id,
-                        originator = cursor.originator_id
+        let mut bytes = Bytes::from(message_bytes);
+        let envelope = PlaintextEnvelope::decode(&mut bytes)?;
+
+        match envelope.content {
+            Some(Content::V1(V1 {
+                idempotency_key,
+                content,
+            })) => {
+                let message_id = calculate_message_id(&self.group_id, &content, &idempotency_key);
+                let queryable_content_fields = Self::extract_queryable_content_fields(&content);
+
+                let message = StoredGroupMessage {
+                    id: message_id.clone(),
+                    group_id: self.group_id.clone(),
+                    decrypted_message_bytes: content,
+                    sent_at_ns: envelope_timestamp_ns,
+                    kind: GroupMessageKind::Application,
+                    sender_installation_id: sender_installation_id.to_vec(),
+                    sender_inbox_id: sender_inbox_id.to_string(),
+                    delivery_status: DeliveryStatus::Published,
+                    content_type: queryable_content_fields.content_type,
+                    version_major: queryable_content_fields.version_major,
+                    version_minor: queryable_content_fields.version_minor,
+                    authority_id: queryable_content_fields.authority_id,
+                    reference_id: queryable_content_fields.reference_id,
+                    sequence_id: cursor.sequence_id as i64,
+                    originator_id: cursor.originator_id as i64,
+                    expire_at_ns: Self::get_message_expire_at_ns(mls_group),
+                    inserted_at_ns: 0,
+                    should_push: true,
+                };
+                message.store_or_ignore(&storage.db())?;
+                identifier.internal_id(message_id);
+
+                if sender_inbox_id == self.context.inbox_id() {
+                    tracing::info!(
+                        installation_id = hex::encode(self.context.installation_id()),
+                        "new sync group message event"
                     );
+                    if let Some(StoredGroup {
+                        conversation_type: ConversationType::Sync,
+                        ..
+                    }) = storage.db().find_group(&self.group_id)?
+                    {
+                        deferred_events.add_worker_event(SyncWorkerEvent::NewSyncGroupMsg);
+                    }
+                }
+                if message.content_type == ContentType::LeaveRequest {
+                    self.process_leave_request_message(mls_group, storage, &message)?;
+                }
+
+                if message.content_type == ContentType::DeleteMessage {
+                    self.process_delete_message(mls_group, storage, &message)?;
                 }
 
                 Ok(())
             }
-        }?;
-        identifier.build()
+            Some(Content::V2(V2 { .. })) => {
+                // V2 was used for DeviceSync V1, which is now removed.
+                // Device Sync V2 reverted back to using V1 envelopes.
+                Ok(())
+            }
+            None => Err(GroupMessageProcessingError::InvalidPayload),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn process_external_staged_commit_message(
+        &self,
+        mls_group: &mut OpenMlsGroup,
+        staged_commit: StagedCommit,
+        validated_commit: ValidatedCommit,
+        message_envelope: &GroupMessage,
+        cursor: Cursor,
+        envelope_timestamp_ns: i64,
+        sender_inbox_id: String,
+        sender_installation_id: Vec<u8>,
+        msg_epoch: u64,
+        msg_group_id: &[u8],
+        storage: &impl XmtpMlsStorageProvider,
+        identifier: &mut MessageIdentifierBuilder,
+    ) -> Result<(), GroupMessageProcessingError> {
+        log_event!(
+            Event::MLSReceivedStagedCommit,
+            self.context.installation_id(),
+            inbox_id = self.context.inbox_id(),
+            sender_inbox = sender_inbox_id,
+            sender_installation_id,
+            group_id = self.group_id,
+            epoch = mls_group.epoch().as_u64(),
+            msg_epoch,
+            msg_group_id,
+            cursor = %cursor,
+            hash = #message_envelope.payload_hash
+        );
+
+        identifier.group_context(staged_commit.group_context().clone());
+
+        mls_group.merge_staged_commit_logged(
+            &XmtpOpenMlsProviderRef::new(storage),
+            staged_commit,
+            &validated_commit,
+            cursor.sequence_id as i64,
+        )?;
+
+        let transcript = self.finalize_applied_staged_commit(
+            mls_group,
+            &validated_commit,
+            envelope_timestamp_ns as u64,
+            cursor,
+            storage,
+        )?;
+
+        if let Some((msg, payload)) = transcript {
+            identifier.internal_id(msg.id);
+
+            log_event!(
+                Event::MLSProcessedStagedCommit,
+                self.context.installation_id(),
+                group_id = self.group_id,
+                epoch = mls_group.epoch().as_u64(),
+                epoch_auth = mls_group.epoch_authenticator().as_slice(),
+                actor_installation_id = validated_commit.actor.installation_id,
+                added_inboxes = $payload.added_inboxes,
+                removed_inboxes = $payload.removed_inboxes,
+                left_inboxes = $payload.left_inboxes,
+                metadata_changes = $payload.metadata_field_changes,
+                cursor = cursor.sequence_id,
+                originator = cursor.originator_id
+            );
+        }
+
+        Ok(())
     }
 
     fn get_message_expire_at_ns(mls_group: &OpenMlsGroup) -> Option<i64> {
