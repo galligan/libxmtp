@@ -60,11 +60,6 @@ use xmtp_id::{
         unverified::{NewUnverifiedSmartContractWalletSignature, UnverifiedSignature},
     },
 };
-use xmtp_mls::client::inbox_addresses_with_verifier;
-use xmtp_mls::identity_updates::revoke_installations_with_verifier;
-use xmtp_mls::identity_updates::{
-    apply_signature_request_with_verifier, get_creation_signature_kind,
-};
 use xmtp_mls::mls_common::group::DMMetadataOptions;
 use xmtp_mls::mls_common::group::GroupMetadataOptions;
 use xmtp_mls::mls_common::group_metadata::GroupMetadata;
@@ -73,6 +68,8 @@ use xmtp_mls::mls_common::group_mutable_metadata::MetadataField;
 use xmtp_mls::{
     Client as MlsClient, ConversationDebugInfo, GroupSyncSummary as XmtpGroupSyncSummary,
     IdentityStrategy, MlsGroup, SqliteCursorStore, XmtpSharedContext,
+    apply_signature_request_with_verifier, get_creation_signature_kind,
+    inbox_addresses_with_verifier, revoke_installations_with_verifier,
 };
 use xmtp_mls::{
     groups::{

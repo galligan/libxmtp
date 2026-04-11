@@ -14,8 +14,7 @@ use xmtp_id::associations::{
   verify_signed_with_public_context,
 };
 use xmtp_id::scw_verifier::SmartContractSignatureVerifier;
-use xmtp_mls::identity_updates::apply_signature_request_with_verifier;
-use xmtp_mls::identity_updates::revoke_installations_with_verifier;
+use xmtp_mls::{apply_signature_request_with_verifier, revoke_installations_with_verifier};
 
 #[napi]
 pub struct SignatureRequestHandle {

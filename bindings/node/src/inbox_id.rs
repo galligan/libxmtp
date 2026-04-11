@@ -7,6 +7,7 @@ use xmtp_api::{ApiClientWrapper, strategies};
 use xmtp_api_d14n::MessageBackendBuilder;
 use xmtp_id::associations::Identifier as XmtpIdentifier;
 use xmtp_id::associations::MemberIdentifier;
+use xmtp_mls::is_member_of_association_state as is_member_of_association_state_with_verifier;
 use xmtp_proto::types::ApiIdentifier;
 
 #[napi]
@@ -86,10 +87,9 @@ async fn is_member_of_association_state(
     .map_err(ErrorWrapper::from)?;
   let api = ApiClientWrapper::new(api_client, strategies::exponential_cooldown());
 
-  let is_member =
-    xmtp_mls::identity_updates::is_member_of_association_state(&api, inbox_id, identifier, None)
-      .await
-      .map_err(ErrorWrapper::from)?;
+  let is_member = is_member_of_association_state_with_verifier(&api, inbox_id, identifier, None)
+    .await
+    .map_err(ErrorWrapper::from)?;
 
   Ok(is_member)
 }
