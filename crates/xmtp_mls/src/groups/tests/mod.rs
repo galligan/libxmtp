@@ -3972,6 +3972,88 @@ async fn external_permission_update_sync_is_idempotent() {
 }
 
 #[xmtp_common::test]
+async fn self_authored_admin_list_update_creates_group_updated_transcript_message() {
+    tester!(alix);
+    tester!(bo);
+
+    let alix_group = alix.create_group(None, None).unwrap();
+    alix_group.add_members(&[bo.inbox_id()]).await.unwrap();
+
+    let group_updates_before = alix_group
+        .find_messages(&MsgQueryArgs {
+            content_types: Some(vec![ContentType::GroupUpdated]),
+            ..Default::default()
+        })
+        .unwrap()
+        .into_iter()
+        .map(|message| message.id)
+        .collect::<Vec<_>>();
+
+    alix_group
+        .update_admin_list(UpdateAdminListType::Add, bo.inbox_id().to_string())
+        .await
+        .unwrap();
+
+    let group_updates_after = alix_group
+        .find_messages(&MsgQueryArgs {
+            content_types: Some(vec![ContentType::GroupUpdated]),
+            ..Default::default()
+        })
+        .unwrap()
+        .into_iter()
+        .map(|message| message.id)
+        .collect::<Vec<_>>();
+
+    assert_eq!(group_updates_after.len(), group_updates_before.len() + 1);
+    assert_ne!(group_updates_after, group_updates_before);
+}
+
+#[xmtp_common::test]
+async fn self_authored_permission_update_does_not_create_group_updated_transcript_message() {
+    tester!(alix);
+    tester!(bo);
+
+    let policy_set = Some(PreconfiguredPolicies::AdminsOnly.to_policy_set());
+    let alix_group = alix.create_group(policy_set, None).unwrap();
+    alix_group.add_members(&[bo.inbox_id()]).await.unwrap();
+
+    let permissions_before = alix_group.permissions().unwrap();
+    let group_updates_before = alix_group
+        .find_messages(&MsgQueryArgs {
+            content_types: Some(vec![ContentType::GroupUpdated]),
+            ..Default::default()
+        })
+        .unwrap()
+        .into_iter()
+        .map(|message| message.id)
+        .collect::<Vec<_>>();
+
+    alix_group
+        .update_permission_policy(
+            PermissionUpdateType::AddMember,
+            PermissionPolicyOption::Allow,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let permissions_after = alix_group.permissions().unwrap();
+    assert_ne!(permissions_after, permissions_before);
+
+    let group_updates_after = alix_group
+        .find_messages(&MsgQueryArgs {
+            content_types: Some(vec![ContentType::GroupUpdated]),
+            ..Default::default()
+        })
+        .unwrap()
+        .into_iter()
+        .map(|message| message.id)
+        .collect::<Vec<_>>();
+
+    assert_eq!(group_updates_after, group_updates_before);
+}
+
+#[xmtp_common::test]
 async fn skip_already_processed_metadata_update_intent() {
     tester!(alix);
     tester!(bo);
