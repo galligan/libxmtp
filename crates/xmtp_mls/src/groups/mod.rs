@@ -21,6 +21,7 @@ pub(super) mod mls_ext;
 pub(super) mod mls_sync;
 pub mod oneshot;
 pub mod send_message_opts;
+mod state_ops;
 pub(super) mod subscriptions;
 pub mod summary;
 #[cfg(test)]
@@ -38,7 +39,6 @@ use self::{
     group_permissions::PolicySet,
     group_permissions::{GroupMutablePermissions, extract_group_permissions},
 };
-use crate::client::ClientError;
 use crate::groups::send_message_opts::SendMessageOpts;
 use crate::groups::{
     intents::{
@@ -69,23 +69,18 @@ use xmtp_common::{Event, log_event, time::now_ns};
 use xmtp_configuration::{
     BROADCAST_PROPOSAL_SUPPORT, CIPHERSUITE, GROUP_MEMBERSHIP_EXTENSION_ID,
     GROUP_PERMISSIONS_EXTENSION_ID, MAX_GROUP_SIZE, MAX_PAST_EPOCHS, MUTABLE_METADATA_EXTENSION_ID,
-    Originators, PROPOSAL_SUPPORT_EXTENSION_ID, WELCOME_POINTEE_ENCRYPTION_AEAD_TYPES_EXTENSION_ID,
+    PROPOSAL_SUPPORT_EXTENSION_ID, WELCOME_POINTEE_ENCRYPTION_AEAD_TYPES_EXTENSION_ID,
     WELCOME_WRAPPER_ENCRYPTION_EXTENSION_ID,
 };
 use xmtp_content_types::leave_request::LeaveRequestCodec;
 use xmtp_content_types::{ContentCodec, encoded_content_to_bytes};
 use xmtp_cryptography::configuration::ED25519_KEY_LENGTH;
-use xmtp_db::local_commit_log::LocalCommitLog;
 use xmtp_db::pending_remove::QueryPendingRemove;
 use xmtp_db::prelude::*;
 use xmtp_db::user_preferences::HmacKey;
-use xmtp_db::{NotFound, StorageError, refresh_state::EntityKind};
+use xmtp_db::{NotFound, StorageError};
 use xmtp_db::{Store, StoreOrIgnore};
-use xmtp_db::{
-    XmtpMlsStorageProvider,
-    consent_record::ConsentState,
-    remote_commit_log::{RemoteCommitLog, RemoteCommitLogOrder},
-};
+use xmtp_db::{XmtpMlsStorageProvider, consent_record::ConsentState};
 use xmtp_db::{
     group::{ConversationType, GroupMembershipState, StoredGroup},
     group_message::{DeliveryStatus, StoredGroupMessage},
@@ -97,8 +92,9 @@ use xmtp_mls_common::{
     group_metadata::{DmMembers, GroupMetadata, extract_group_metadata},
     group_mutable_metadata::{GroupMutableMetadata, GroupMutableMetadataError, MetadataField},
 };
+use xmtp_proto::types::Cursor;
+use xmtp_proto::xmtp::mls::message_contents::OneshotMessage;
 use xmtp_proto::xmtp::mls::message_contents::content_types::LeaveRequest;
-use xmtp_proto::{types::Cursor, xmtp::mls::message_contents::OneshotMessage};
 
 const MAX_GROUP_DESCRIPTION_LENGTH: usize = 1000;
 const MAX_GROUP_NAME_LENGTH: usize = 100;
@@ -712,17 +708,6 @@ where
         Ok(())
     }
 
-    /// Load the group reference stored in the local database
-    pub fn load(&self) -> Result<StoredGroup, StorageError> {
-        let conn = self.context.db();
-        if let Some(group) = conn.find_group(&self.group_id)? {
-            Ok(group)
-        } else {
-            tracing::error!("group {} does not exist", hex::encode(&self.group_id));
-            Err(NotFound::GroupById(self.group_id.to_vec()).into())
-        }
-    }
-
     ///
     /// Add members to the group by account address
     ///
@@ -1149,96 +1134,6 @@ where
         }
     }
 
-    pub fn pending_remove_list(&self) -> Result<Vec<String>, GroupError> {
-        self.context
-            .db()
-            .get_pending_remove_users(&self.group_id)
-            .map_err(Into::into)
-    }
-
-    /// Checks if the given inbox ID is the pending-remove list of the group at the most recently synced epoch.
-    pub fn is_in_pending_remove(&self, inbox_id: &str) -> Result<bool, GroupError> {
-        self.context
-            .db()
-            .get_user_pending_remove_status(&self.group_id, inbox_id)
-            .map_err(Into::into)
-    }
-
-    /// Retrieves the conversation type of the group from the group's metadata extension.
-    pub async fn conversation_type(&self) -> Result<ConversationType, GroupError> {
-        let conversation_type = self.context.db().get_conversation_type(&self.group_id)?;
-        Ok(conversation_type)
-    }
-
-    /// Get the current epoch number of the group.
-    pub async fn epoch(&self) -> Result<u64, GroupError> {
-        self.load_mls_group_with_lock_async(async |mls_group| Ok(mls_group.epoch().as_u64()))
-            .await
-    }
-
-    /// Get the encryption state of the current epoch. Should match for all installations
-    /// in the same epoch.
-    pub(crate) async fn epoch_authenticator(&self) -> Result<Vec<u8>, GroupError> {
-        self.load_mls_group_with_lock_async(async |mls_group| {
-            Ok(mls_group.epoch_authenticator().as_slice().to_vec())
-        })
-        .await
-    }
-
-    pub async fn cursor(&self) -> Result<[Cursor; 2], GroupError> {
-        let db = self.context.db();
-        let msgs = db.get_last_cursor_for_originator(
-            &self.group_id,
-            EntityKind::ApplicationMessage,
-            Originators::APPLICATION_MESSAGES,
-        )?;
-        let commits = db.get_last_cursor_for_originator(
-            &self.group_id,
-            EntityKind::CommitMessage,
-            Originators::MLS_COMMITS,
-        )?;
-        Ok([msgs, commits])
-    }
-
-    pub async fn local_commit_log(&self) -> Result<Vec<LocalCommitLog>, GroupError> {
-        Ok(self.context.db().get_group_logs(&self.group_id)?)
-    }
-
-    pub async fn remote_commit_log(&self) -> Result<Vec<RemoteCommitLog>, GroupError> {
-        Ok(self.context.db().get_remote_commit_log_after_cursor(
-            &self.group_id,
-            0,
-            RemoteCommitLogOrder::AscendingByRowid,
-        )?)
-    }
-
-    pub async fn debug_info(&self) -> Result<ConversationDebugInfo, GroupError> {
-        let epoch = self.epoch().await?;
-        let cursor = self.cursor().await?;
-        let commit_log = self.local_commit_log().await?;
-        let remote_commit_log = self.remote_commit_log().await?;
-        let db = self.context.db();
-
-        let stored_group = match db.find_group(&self.group_id)? {
-            Some(group) => group,
-            None => {
-                return Err(GroupError::NotFound(NotFound::GroupById(
-                    self.group_id.clone(),
-                )));
-            }
-        };
-
-        Ok(ConversationDebugInfo {
-            epoch,
-            maybe_forked: stored_group.maybe_forked,
-            fork_details: stored_group.fork_details,
-            is_commit_log_forked: stored_group.is_commit_log_forked,
-            local_commit_log: format!("{:?}", commit_log),
-            remote_commit_log: format!("{:?}", remote_commit_log),
-            cursor: cursor.to_vec(),
-        })
-    }
-
     /// Update this installation's leaf key in the group by creating a key update commit
     #[cfg_attr(any(test, feature = "test-utils"), tracing::instrument(level = "info", fields(who = %self.context.inbox_id()), skip(self)))]
     #[cfg_attr(
@@ -1249,85 +1144,6 @@ where
         let intent = QueueIntent::key_update().queue(self)?;
         let _ = self.sync_until_intent_resolved(intent.id).await?;
         Ok(())
-    }
-
-    /// Checks if the current user is active in the group.
-    ///
-    /// If the current user has been kicked out of the group, `is_active` will return `false`
-    #[tracing::instrument(skip_all, level = "trace")]
-    pub fn is_active(&self) -> Result<bool, GroupError> {
-        // Restored groups that are not yet added are inactive
-        let Some(stored_group) = self.context.db().find_group(&self.group_id)? else {
-            return Err(GroupError::NotFound(NotFound::GroupById(
-                self.group_id.clone(),
-            )));
-        };
-        if matches!(
-            stored_group.membership_state,
-            GroupMembershipState::Restored
-        ) {
-            return Ok(false);
-        }
-
-        self.load_mls_group_with_lock(self.context.mls_storage(), |mls_group| {
-            Ok(mls_group.is_active())
-        })
-    }
-
-    /// Returns the membership state of the current user in this group.
-    #[tracing::instrument(skip_all, level = "trace")]
-    pub fn membership_state(&self) -> Result<GroupMembershipState, GroupError> {
-        let stored_group = self
-            .context
-            .db()
-            .find_group(&self.group_id)?
-            .ok_or_else(|| GroupError::NotFound(NotFound::GroupById(self.group_id.clone())))?;
-        Ok(stored_group.membership_state)
-    }
-
-    /// Get the `GroupMetadata` of the group.
-    pub async fn metadata(&self) -> Result<GroupMetadata, GroupError> {
-        self.load_mls_group_with_lock_async(async |mls_group| {
-            extract_group_metadata(mls_group.extensions())
-                .map_err(MetadataPermissionsError::from)
-                .map_err(Into::into)
-        })
-        .await
-    }
-
-    /// Get the `GroupMutableMetadata` of the group.
-    pub fn mutable_metadata(&self) -> Result<GroupMutableMetadata, GroupError> {
-        self.load_mls_group_with_lock(self.context.mls_storage(), |mls_group| {
-            GroupMutableMetadata::try_from(&mls_group)
-                .map_err(MetadataPermissionsError::from)
-                .map_err(GroupError::from)
-        })
-    }
-
-    pub fn permissions(&self) -> Result<GroupMutablePermissions, GroupError> {
-        self.load_mls_group_with_lock(self.context.mls_storage(), |mls_group| {
-            Ok(extract_group_permissions(&mls_group).map_err(MetadataPermissionsError::from)?)
-        })
-    }
-
-    /// Find all the duplicate dms for this group
-    pub fn find_duplicate_dms(&self) -> Result<Vec<MlsGroup<Context>>, ClientError> {
-        let duplicates = self.context.db().other_dms(&self.group_id)?;
-
-        let mls_groups = duplicates
-            .into_iter()
-            .map(|g| {
-                MlsGroup::new(
-                    self.context.clone(),
-                    g.id,
-                    g.dm_id,
-                    g.conversation_type,
-                    g.created_at_ns,
-                )
-            })
-            .collect();
-
-        Ok(mls_groups)
     }
 
     /// Used for testing that dm group validation works as expected.
