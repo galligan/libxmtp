@@ -4923,6 +4923,119 @@ async fn test_protocol_version_pause_replays_later_commit_after_upgrade() {
     assert!(commit_cursor_after_upgrade.sequence_id > commit_cursor_before.sequence_id);
 }
 
+#[xmtp_common::test]
+async fn test_protocol_version_pause_replays_later_application_message_after_upgrade() {
+    let mut amal_version = VersionInfo::default();
+    amal_version.test_update_version(
+        increment_patch_version(amal_version.pkg_version())
+            .unwrap()
+            .as_str(),
+    );
+
+    let amal =
+        ClientBuilder::new_test_client_with_version(&generate_local_wallet(), amal_version.clone())
+            .await;
+    let bo = ClientBuilder::new_test_client(&generate_local_wallet()).await;
+
+    let amal_group = amal.create_group(None, None).unwrap();
+    amal_group
+        .add_members(&[bo.context.identity.inbox_id()])
+        .await
+        .unwrap();
+
+    amal_group
+        .send_message("Hello, world!".as_bytes(), SendMessageOpts::default())
+        .await
+        .unwrap();
+
+    bo.sync_welcomes().await.unwrap();
+    let binding = bo.find_groups(GroupQueryArgs::default()).unwrap();
+    let bo_group = binding.first().unwrap();
+    bo_group.sync().await.unwrap();
+
+    let application_cursor_before = bo
+        .context
+        .db()
+        .get_last_cursor_for_originator(
+            &bo_group.group_id,
+            EntityKind::ApplicationMessage,
+            Originators::APPLICATION_MESSAGES,
+        )
+        .unwrap();
+
+    amal_group
+        .update_group_min_version_to_match_self()
+        .await
+        .unwrap();
+    amal_group.sync().await.unwrap();
+    amal_group
+        .send_message("new version only!".as_bytes(), SendMessageOpts::default())
+        .await
+        .unwrap();
+
+    let _ = bo_group.sync().await;
+    assert_eq!(
+        bo_group.paused_for_version().unwrap(),
+        Some(amal.version_info().pkg_version().to_string())
+    );
+
+    let application_cursor_while_paused = bo
+        .context
+        .db()
+        .get_last_cursor_for_originator(
+            &bo_group.group_id,
+            EntityKind::ApplicationMessage,
+            Originators::APPLICATION_MESSAGES,
+        )
+        .unwrap();
+    assert_eq!(application_cursor_before, application_cursor_while_paused);
+
+    let messages_while_paused = bo_group.find_messages(&MsgQueryArgs::default()).unwrap();
+    let last_message_while_paused = messages_while_paused.last().unwrap();
+    let message_text_while_paused =
+        String::from_utf8_lossy(&last_message_while_paused.decrypted_message_bytes);
+    assert_eq!(message_text_while_paused, "Hello, world!");
+
+    let mut bo_version = bo.version_info().clone();
+    bo_version.test_update_version(
+        increment_patch_version(bo_version.pkg_version())
+            .unwrap()
+            .as_str(),
+    );
+    let bo = ClientBuilder::from_client(bo)
+        .version(bo_version)
+        .build()
+        .await
+        .unwrap();
+
+    let binding = bo.find_groups(GroupQueryArgs::default()).unwrap();
+    let bo_group = binding.first().unwrap();
+    bo_group.sync().await.unwrap();
+    let _ = bo_group.sync().await;
+
+    assert_eq!(bo_group.paused_for_version().unwrap(), None);
+
+    let messages_after_upgrade = bo_group.find_messages(&MsgQueryArgs::default()).unwrap();
+    let last_message_after_upgrade = messages_after_upgrade.last().unwrap();
+    let message_text_after_upgrade =
+        String::from_utf8_lossy(&last_message_after_upgrade.decrypted_message_bytes);
+    assert_eq!(message_text_after_upgrade, "new version only!");
+
+    let application_cursor_after_upgrade = bo
+        .context
+        .db()
+        .get_last_cursor_for_originator(
+            &bo_group.group_id,
+            EntityKind::ApplicationMessage,
+            Originators::APPLICATION_MESSAGES,
+        )
+        .unwrap();
+    assert!(
+        application_cursor_after_upgrade.sequence_id > application_cursor_before.sequence_id,
+        "application cursor did not advance across pause replay: before={application_cursor_before:?} paused={application_cursor_while_paused:?} after={application_cursor_after_upgrade:?}"
+    );
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_can_make_inbox_with_a_bad_key_package_an_admin() {
