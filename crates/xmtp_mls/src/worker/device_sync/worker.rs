@@ -1,6 +1,7 @@
 use super::{ArchiveOptions, BackupElementSelection};
 use super::{
     DeviceSyncClient, DeviceSyncError, IterWithContent,
+    catalog::{find_requested_archive_reply, list_available_archives_from_db},
     preference_sync::{PreferenceUpdate, store_preference_updates},
 };
 use crate::{
@@ -19,8 +20,8 @@ use std::{sync::Arc, time::Duration};
 use tokio::sync::{OnceCell, broadcast};
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use tracing::instrument;
-use xmtp_archive::{ArchiveImporter, BackupMetadata, exporter::ArchiveExporter};
-use xmtp_common::{Event, NS_IN_DAY, time::now_ns};
+use xmtp_archive::{ArchiveImporter, exporter::ArchiveExporter};
+use xmtp_common::Event;
 use xmtp_db::group_message::{MsgQueryArgs, StoredGroupMessage};
 use xmtp_db::{prelude::*, tasks::NewTask};
 use xmtp_macro::log_event;
@@ -546,24 +547,9 @@ where
 
     /// Processes sync archive with a matching pin. If no pin is provided, will process latest archive.
     pub async fn process_archive_with_pin(&self, pin: Option<&str>) -> Result<(), DeviceSyncError> {
-        let mut offset = 0;
-        let mut messages = vec![];
-        loop {
-            messages = self.context.db().sync_group_messages_paged(offset, 100)?;
-            if messages.is_empty() {
-                break;
-            }
-
-            offset += messages.len() as i64;
-            for (msg, content) in messages.iter_with_content() {
-                let reply = match (pin, content) {
-                    (None, ContentProto::Reply(reply)) => reply,
-                    (Some(pin), ContentProto::Reply(reply)) if reply.request_id == pin => reply,
-                    _ => continue,
-                };
-
-                return self.process_archive(&msg, reply).await;
-            }
+        let conn = self.context.db();
+        if let Some((msg, reply)) = find_requested_archive_reply(&conn, pin)? {
+            return self.process_archive(&msg, reply).await;
         }
 
         Err(DeviceSyncError::MissingPayload(pin.map(str::to_string)))
@@ -573,46 +559,7 @@ where
         &self,
         days_cutoff: i64,
     ) -> Result<Vec<AvailableArchive>, DeviceSyncError> {
-        let mut offset = 0;
-        let mut messages = vec![];
-        let mut result = vec![];
-        let cutoff = now_ns() - days_cutoff * NS_IN_DAY;
-
-        'outer: loop {
-            messages = self.context.db().sync_group_messages_paged(offset, 100)?;
-
-            if messages.is_empty() {
-                break;
-            }
-            offset += messages.len() as i64;
-
-            for (msg, content) in messages.iter_with_content() {
-                if msg.sent_at_ns < cutoff {
-                    break 'outer;
-                }
-
-                let ContentProto::Reply(reply) = content else {
-                    continue;
-                };
-
-                let Some(metadata) = reply.metadata else {
-                    tracing::warn!(
-                        "Came across a device sync reply message with no metadata. request_id: {}",
-                        reply.request_id
-                    );
-                    continue;
-                };
-
-                let metadata = BackupMetadata::from_metadata_version_unknown(metadata);
-                result.push(AvailableArchive {
-                    pin: reply.request_id,
-                    metadata,
-                    sent_by_installation: msg.sender_installation_id,
-                });
-            }
-        }
-
-        Ok(result)
+        list_available_archives_from_db(&self.context.db(), days_cutoff)
     }
 
     pub async fn process_archive(

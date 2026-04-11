@@ -43,6 +43,7 @@ use xmtp_proto::xmtp::{
 };
 
 pub mod archive;
+pub(crate) mod catalog;
 pub mod preference_sync;
 pub mod worker;
 
