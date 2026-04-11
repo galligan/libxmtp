@@ -1,3 +1,4 @@
+mod bootstrap;
 #[cfg(test)]
 mod tests;
 
@@ -6,10 +7,10 @@ use super::{
     stream_conversations::{StreamConversations, WelcomesApiSubscription},
     stream_messages::StreamGroupMessages,
 };
-use crate::groups::welcome_sync::WelcomeService;
 use crate::subscriptions::SyncWorkerEvent;
 use crate::{context::XmtpSharedContext, subscriptions::stream_messages::MessagesApiSubscription};
 use crate::{groups::MlsGroup, subscriptions::StreamKind};
+use bootstrap::load_stream_bootstrap;
 use futures::stream::Stream;
 use pin_project::{pin_project, pinned_drop};
 use std::{
@@ -19,15 +20,10 @@ use std::{
 };
 use xmtp_common::Event;
 use xmtp_db::{
-    consent_record::ConsentState,
-    group::StoredGroup,
-    group::{ConversationType, GroupQueryArgs},
-    group_message::StoredGroupMessage,
-    prelude::*,
+    consent_record::ConsentState, group::ConversationType, group_message::StoredGroupMessage,
 };
 use xmtp_macro::log_event;
 use xmtp_proto::api_client::XmtpMlsStreams;
-use xmtp_proto::types::GroupId;
 
 #[pin_project(PinnedDrop)]
 pub struct StreamAllMessages<'a, Context, Conversations, Messages>
@@ -107,41 +103,9 @@ where
         conversation_type: Option<ConversationType>,
         consent_states: Option<Vec<ConsentState>>,
     ) -> Result<Self> {
-        let (active_conversations, sync_groups) = async {
-            let conn = context.db();
-            WelcomeService::new(context.as_ref())
-                .sync_welcomes()
+        let bootstrap =
+            load_stream_bootstrap(context.as_ref(), conversation_type, consent_states.clone())
                 .await?;
-
-            let groups = conn.find_groups(GroupQueryArgs {
-                conversation_type,
-                consent_states: consent_states.clone(),
-                include_duplicate_dms: true,
-                include_sync_groups: conversation_type
-                    .map(|ct| matches!(ct, ConversationType::Sync))
-                    .unwrap_or(true),
-                ..Default::default()
-            })?;
-
-            let sync_groups = groups
-                .iter()
-                .filter_map(|g| match g {
-                    StoredGroup {
-                        conversation_type: ConversationType::Sync,
-                        ..
-                    } => Some(g.id.clone()),
-                    _ => None,
-                })
-                .collect();
-            let active_conversations = groups
-                .into_iter()
-                // TODO: Create find groups query only for group ID
-                .map(|g| GroupId::from(g.id))
-                .collect();
-
-            Ok::<_, SubscribeError>((active_conversations, sync_groups))
-        }
-        .await?;
 
         let conversations = super::stream_conversations::StreamConversations::from_cow(
             context.clone(),
@@ -150,14 +114,15 @@ where
             consent_states,
         )
         .await?;
-        let messages = StreamGroupMessages::from_cow(context.clone(), active_conversations).await?;
+        let messages =
+            StreamGroupMessages::from_cow(context.clone(), bootstrap.active_conversations).await?;
 
         Ok(Self {
             context,
             conversation_type,
             messages,
             conversations,
-            sync_groups,
+            sync_groups: bootstrap.sync_groups,
         })
     }
 }
