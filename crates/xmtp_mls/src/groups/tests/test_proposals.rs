@@ -6,6 +6,7 @@
 //! 3. That proposals_enabled correctly detects group context extension
 
 use crate::{
+    context::XmtpSharedContext,
     groups::{
         build_proposals_enabled_extension,
         intents::{CommitPendingProposalsIntentData, ProposeMemberUpdateIntentData},
@@ -15,6 +16,7 @@ use crate::{
 };
 use openmls::extensions::{Extension, UnknownExtension};
 use rstest::rstest;
+use xmtp_api_d14n::protocol::XmtpQuery;
 use xmtp_configuration::PROPOSAL_SUPPORT_EXTENSION_ID;
 use xmtp_db::{group_intent::IntentKind, prelude::*};
 
@@ -1077,6 +1079,25 @@ async fn test_non_admin_proposal_rejected_in_admin_only_group() {
         .sync_until_intent_resolved(propose_intent.id)
         .await?;
 
+    let rejected_proposal = alix
+        .context
+        .api()
+        .query_at(
+            xmtp_proto::types::TopicKind::GroupMessagesV1.create(&alix_group.group_id),
+            None,
+        )
+        .await?
+        .group_messages()?
+        .last()
+        .cloned()
+        .expect("proposal should be present in the group topic");
+
+    let proposal_cursor_before = alix.context.db().get_last_cursor_for_originator(
+        &alix_group.group_id,
+        xmtp_db::refresh_state::EntityKind::ApplicationMessage,
+        rejected_proposal.originator_id(),
+    )?;
+
     // Alix syncs - the proposal should be rejected during validation
     // We sync and check that Alix doesn't have the proposal in their pending proposals
     let sync_result = alix_group.sync().await;
@@ -1097,6 +1118,22 @@ async fn test_non_admin_proposal_rejected_in_admin_only_group() {
     assert_eq!(
         alix_pending, 0,
         "Alix should have no pending proposals (Bo's was rejected)"
+    );
+
+    let proposal_cursor_after = alix.context.db().get_last_cursor_for_originator(
+        &alix_group.group_id,
+        xmtp_db::refresh_state::EntityKind::ApplicationMessage,
+        rejected_proposal.originator_id(),
+    )?;
+    assert_eq!(proposal_cursor_after, rejected_proposal.cursor);
+    assert!(proposal_cursor_after.sequence_id > proposal_cursor_before.sequence_id);
+
+    // A second sync should not keep tripping over the same rejected proposal.
+    let second_sync_result = alix_group.sync().await;
+    assert!(
+        second_sync_result.is_ok(),
+        "rejected proposal cursor should be consumed after first sync: {:?}",
+        second_sync_result
     );
 
     tracing::info!(
