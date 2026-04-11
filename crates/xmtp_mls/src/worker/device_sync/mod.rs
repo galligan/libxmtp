@@ -44,6 +44,7 @@ use xmtp_proto::xmtp::{
 
 pub mod archive;
 pub(crate) mod catalog;
+pub(crate) mod inbound;
 pub mod preference_sync;
 pub mod worker;
 
