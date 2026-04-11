@@ -3690,8 +3690,10 @@ async fn external_group_update_sync_is_idempotent() {
         .iter()
         .map(|message| message.id.clone())
         .collect::<Vec<_>>();
-    assert_eq!(updates_after_first_sync.len(), updates_before.len() + 1);
-    assert_ne!(update_ids_after_first_sync, update_ids_before);
+    // Permission-only mirrored commits update recipient state, but do not currently
+    // produce a transcript-visible GroupUpdated payload because the validated commit is
+    // considered empty for transcript purposes.
+    assert_eq!(update_ids_after_first_sync, update_ids_before);
 
     bo_group.sync().await.unwrap();
     assert_eq!(bo_group.group_name().unwrap(), "metadata replay check");
@@ -3832,6 +3834,132 @@ async fn external_membership_removal_sync_is_idempotent() {
             .iter()
             .any(|member| member.inbox_id == charlie.inbox_id())
     );
+
+    let updates_after_second_sync = group_updates();
+    assert_eq!(
+        updates_after_second_sync
+            .iter()
+            .map(|message| message.id.clone())
+            .collect::<Vec<_>>(),
+        update_ids_after_first_sync
+    );
+}
+
+#[xmtp_common::test]
+async fn external_admin_list_sync_is_idempotent() {
+    tester!(alix);
+    tester!(bo);
+
+    let alix_group = alix.create_group(None, None).unwrap();
+    alix_group.add_members(&[bo.inbox_id()]).await.unwrap();
+
+    bo.sync_welcomes().await.unwrap();
+    let bo_groups = bo.find_groups(GroupQueryArgs::default()).unwrap();
+    let bo_group = bo_groups.first().unwrap();
+    bo_group.sync().await.unwrap();
+
+    let group_updates = || {
+        bo_group
+            .find_messages(&MsgQueryArgs {
+                content_types: Some(vec![ContentType::GroupUpdated]),
+                ..Default::default()
+            })
+            .unwrap()
+    };
+
+    let updates_before = group_updates();
+    let update_ids_before = updates_before
+        .iter()
+        .map(|message| message.id.clone())
+        .collect::<Vec<_>>();
+
+    alix_group
+        .update_admin_list(UpdateAdminListType::Add, bo.inbox_id().to_string())
+        .await
+        .unwrap();
+
+    bo_group.sync().await.unwrap();
+    assert_eq!(bo_group.admin_list().unwrap(), vec![bo.inbox_id().to_string()]);
+
+    let updates_after_first_sync = group_updates();
+    let update_ids_after_first_sync = updates_after_first_sync
+        .iter()
+        .map(|message| message.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(updates_after_first_sync.len(), updates_before.len() + 1);
+    assert_ne!(update_ids_after_first_sync, update_ids_before);
+
+    bo_group.sync().await.unwrap();
+    assert_eq!(bo_group.admin_list().unwrap(), vec![bo.inbox_id().to_string()]);
+
+    let updates_after_second_sync = group_updates();
+    assert_eq!(
+        updates_after_second_sync
+            .iter()
+            .map(|message| message.id.clone())
+            .collect::<Vec<_>>(),
+        update_ids_after_first_sync
+    );
+}
+
+#[xmtp_common::test]
+async fn external_permission_update_sync_is_idempotent() {
+    tester!(alix);
+    tester!(bo);
+
+    let policy_set = Some(PreconfiguredPolicies::AdminsOnly.to_policy_set());
+    let alix_group = alix.create_group(policy_set, None).unwrap();
+    alix_group.add_members(&[bo.inbox_id()]).await.unwrap();
+
+    bo.sync_welcomes().await.unwrap();
+    let bo_groups = bo.find_groups(GroupQueryArgs::default()).unwrap();
+    let bo_group = bo_groups.first().unwrap();
+    bo_group.sync().await.unwrap();
+
+    let group_updates = || {
+        bo_group
+            .find_messages(&MsgQueryArgs {
+                content_types: Some(vec![ContentType::GroupUpdated]),
+                ..Default::default()
+            })
+            .unwrap()
+    };
+
+    let permissions_before = bo_group.permissions().unwrap();
+    let updates_before = group_updates();
+    let update_ids_before = updates_before
+        .iter()
+        .map(|message| message.id.clone())
+        .collect::<Vec<_>>();
+
+    alix_group
+        .update_permission_policy(
+            PermissionUpdateType::AddMember,
+            PermissionPolicyOption::Allow,
+            None,
+        )
+        .await
+        .unwrap();
+
+    bo_group.sync().await.unwrap();
+
+    let permissions_after_first_sync = bo_group.permissions().unwrap();
+    assert_ne!(permissions_after_first_sync, permissions_before);
+
+    let updates_after_first_sync = group_updates();
+    let update_ids_after_first_sync = updates_after_first_sync
+        .iter()
+        .map(|message| message.id.clone())
+        .collect::<Vec<_>>();
+    // Mirrored permission-only commits update recipient state without producing a new
+    // GroupUpdated transcript message because ValidatedCommit::is_empty() does not
+    // consider permission changes transcript-worthy.
+    assert_eq!(update_ids_after_first_sync, update_ids_before);
+
+    bo_group.sync().await.unwrap();
+
+    let permissions_after_second_sync = bo_group.permissions().unwrap();
+    assert_eq!(permissions_after_second_sync, permissions_after_first_sync);
 
     let updates_after_second_sync = group_updates();
     assert_eq!(
@@ -4216,6 +4344,279 @@ async fn skip_already_processed_membership_removal_intent() {
         .map(|message| message.id)
         .collect::<Vec<_>>();
     assert_eq!(membership_updates_after, membership_updates_before);
+
+    let commit_log_after = alix_group
+        .local_commit_log()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|log| {
+            (
+                log.rowid,
+                log.commit_sequence_id,
+                log.commit_result,
+                log.applied_epoch_number,
+                log.commit_type,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(commit_log_after, commit_log_before);
+}
+
+#[xmtp_common::test]
+async fn skip_already_processed_admin_list_intent() {
+    tester!(alix);
+    tester!(bo);
+
+    let alix_group = alix.create_group(None, None).unwrap();
+    alix_group.add_members(&[bo.inbox_id()]).await.unwrap();
+    alix_group
+        .update_admin_list(UpdateAdminListType::Add, bo.inbox_id().to_string())
+        .await
+        .unwrap();
+
+    let processed_intents_before = alix
+        .context
+        .db()
+        .find_group_intents(
+            alix_group.clone().group_id,
+            Some(vec![IntentState::Processed]),
+            None,
+        )
+        .unwrap();
+    let admin_update_intent = processed_intents_before
+        .iter()
+        .filter(|intent| intent.kind == IntentKind::UpdateAdminList)
+        .max_by_key(|intent| intent.id)
+        .unwrap();
+    let admin_update_cursor = (
+        admin_update_intent.sequence_id,
+        admin_update_intent.originator_id,
+    );
+
+    let group_updates_before = alix_group
+        .find_messages(&MsgQueryArgs {
+            content_types: Some(vec![ContentType::GroupUpdated]),
+            ..Default::default()
+        })
+        .unwrap()
+        .into_iter()
+        .map(|message| message.id)
+        .collect::<Vec<_>>();
+    let commit_log_before = alix_group
+        .local_commit_log()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|log| {
+            (
+                log.rowid,
+                log.commit_sequence_id,
+                log.commit_result,
+                log.applied_epoch_number,
+                log.commit_type,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let process_result = alix_group
+        .sync_until_intent_resolved(admin_update_intent.id)
+        .await;
+    assert_ok!(process_result);
+
+    let processed_intents_after = alix
+        .context
+        .db()
+        .find_group_intents(
+            alix_group.clone().group_id,
+            Some(vec![IntentState::Processed]),
+            None,
+        )
+        .unwrap();
+    let admin_update_intent_after = processed_intents_after
+        .iter()
+        .find(|intent| intent.id == admin_update_intent.id)
+        .unwrap();
+    assert_eq!(admin_update_intent_after.state, IntentState::Processed);
+    assert_eq!(
+        (
+            admin_update_intent_after.sequence_id,
+            admin_update_intent_after.originator_id
+        ),
+        admin_update_cursor
+    );
+
+    let unresolved_intents = alix
+        .context
+        .db()
+        .find_group_intents(
+            alix_group.clone().group_id,
+            Some(vec![
+                IntentState::ToPublish,
+                IntentState::Published,
+                IntentState::Committed,
+                IntentState::Error,
+            ]),
+            None,
+        )
+        .unwrap();
+    assert!(unresolved_intents.is_empty());
+
+    let admin_list_after = alix_group.admin_list().unwrap();
+    assert_eq!(admin_list_after, vec![bo.inbox_id().to_string()]);
+
+    let group_updates_after = alix_group
+        .find_messages(&MsgQueryArgs {
+            content_types: Some(vec![ContentType::GroupUpdated]),
+            ..Default::default()
+        })
+        .unwrap()
+        .into_iter()
+        .map(|message| message.id)
+        .collect::<Vec<_>>();
+    assert_eq!(group_updates_after, group_updates_before);
+
+    let commit_log_after = alix_group
+        .local_commit_log()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|log| {
+            (
+                log.rowid,
+                log.commit_sequence_id,
+                log.commit_result,
+                log.applied_epoch_number,
+                log.commit_type,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(commit_log_after, commit_log_before);
+}
+
+#[xmtp_common::test]
+async fn skip_already_processed_permission_update_intent() {
+    tester!(alix);
+    tester!(bo);
+
+    let policy_set = Some(PreconfiguredPolicies::AdminsOnly.to_policy_set());
+    let alix_group = alix.create_group(policy_set, None).unwrap();
+    alix_group.add_members(&[bo.inbox_id()]).await.unwrap();
+
+    let permissions_before = alix_group.permissions().unwrap();
+
+    alix_group
+        .update_permission_policy(
+            PermissionUpdateType::AddMember,
+            PermissionPolicyOption::Allow,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let permissions_after_first_apply = alix_group.permissions().unwrap();
+    assert_ne!(permissions_after_first_apply, permissions_before);
+
+    let processed_intents_before = alix
+        .context
+        .db()
+        .find_group_intents(
+            alix_group.clone().group_id,
+            Some(vec![IntentState::Processed]),
+            None,
+        )
+        .unwrap();
+    let permission_update_intent = processed_intents_before
+        .iter()
+        .filter(|intent| intent.kind == IntentKind::UpdatePermission)
+        .max_by_key(|intent| intent.id)
+        .unwrap();
+    let permission_update_cursor = (
+        permission_update_intent.sequence_id,
+        permission_update_intent.originator_id,
+    );
+
+    let group_updates_before = alix_group
+        .find_messages(&MsgQueryArgs {
+            content_types: Some(vec![ContentType::GroupUpdated]),
+            ..Default::default()
+        })
+        .unwrap()
+        .into_iter()
+        .map(|message| message.id)
+        .collect::<Vec<_>>();
+    let commit_log_before = alix_group
+        .local_commit_log()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|log| {
+            (
+                log.rowid,
+                log.commit_sequence_id,
+                log.commit_result,
+                log.applied_epoch_number,
+                log.commit_type,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let process_result = alix_group
+        .sync_until_intent_resolved(permission_update_intent.id)
+        .await;
+    assert_ok!(process_result);
+
+    let processed_intents_after = alix
+        .context
+        .db()
+        .find_group_intents(
+            alix_group.clone().group_id,
+            Some(vec![IntentState::Processed]),
+            None,
+        )
+        .unwrap();
+    let permission_update_intent_after = processed_intents_after
+        .iter()
+        .find(|intent| intent.id == permission_update_intent.id)
+        .unwrap();
+    assert_eq!(permission_update_intent_after.state, IntentState::Processed);
+    assert_eq!(
+        (
+            permission_update_intent_after.sequence_id,
+            permission_update_intent_after.originator_id
+        ),
+        permission_update_cursor
+    );
+
+    let unresolved_intents = alix
+        .context
+        .db()
+        .find_group_intents(
+            alix_group.clone().group_id,
+            Some(vec![
+                IntentState::ToPublish,
+                IntentState::Published,
+                IntentState::Committed,
+                IntentState::Error,
+            ]),
+            None,
+        )
+        .unwrap();
+    assert!(unresolved_intents.is_empty());
+
+    let permissions_after_replay = alix_group.permissions().unwrap();
+    assert_eq!(permissions_after_replay, permissions_after_first_apply);
+
+    let group_updates_after = alix_group
+        .find_messages(&MsgQueryArgs {
+            content_types: Some(vec![ContentType::GroupUpdated]),
+            ..Default::default()
+        })
+        .unwrap()
+        .into_iter()
+        .map(|message| message.id)
+        .collect::<Vec<_>>();
+    assert_eq!(group_updates_after, group_updates_before);
 
     let commit_log_after = alix_group
         .local_commit_log()
