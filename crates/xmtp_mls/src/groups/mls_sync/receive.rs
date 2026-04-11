@@ -12,7 +12,7 @@ where
     ) -> Result<MessageIdentifier, GroupMessageProcessingError> {
         let message = match process_result {
             Ok(m) => {
-                self.context.db().prune_icebox()?;
+                persistence::prune_processed_icebox(&self.context)?;
                 tracing::info!(
                     "Transaction completed successfully: process for group [{}] envelope cursor[{}]",
                     &envelope.group_id,
@@ -24,13 +24,11 @@ where
                 CommitValidationError::ProtocolVersionTooLow(min_version),
             )) => {
                 // Instead of updating cursor, mark group as paused
-                self.context
-                    .db()
-                    .set_group_paused(&self.group_id, &min_version)?;
-                tracing::warn!(
-                    "Group [{}] paused due to minimum protocol version requirement",
-                    hex::encode(&self.group_id)
-                );
+                persistence::pause_group_for_protocol_version(
+                    &self.context,
+                    &self.group_id,
+                    &min_version,
+                )?;
                 Err(GroupMessageProcessingError::GroupPaused)
             }
             Err(e) => {
