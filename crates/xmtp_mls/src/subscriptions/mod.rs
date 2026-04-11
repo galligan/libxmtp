@@ -8,7 +8,6 @@ pub mod process_welcome;
 mod stream_all;
 mod stream_conversations;
 pub mod stream_messages;
-pub(crate) use process_welcome::ProcessWelcomeResult;
 pub(crate) use stream_all::StreamAllMessages;
 
 use crate::groups::{GroupError, mls_sync::GroupMessageProcessingError};
