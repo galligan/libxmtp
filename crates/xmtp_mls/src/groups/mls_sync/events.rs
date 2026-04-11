@@ -1,4 +1,5 @@
 use super::*;
+use crate::messages::decoded_message::DecodedMessage;
 use std::collections::VecDeque;
 use tokio::sync::broadcast;
 
@@ -54,4 +55,23 @@ impl DeferredEvents {
             let _ = context.local_events().send(event);
         }
     }
+}
+
+pub(super) fn emit_local_event<Context>(context: &Context, event: LocalEvents)
+where
+    Context: DeferredEventContext,
+{
+    let _ = context.local_events().send(event);
+}
+
+pub(super) fn emit_message_deleted_event<Context>(
+    context: &Context,
+    decoded_message: DecodedMessage,
+) where
+    Context: DeferredEventContext,
+{
+    emit_local_event(
+        context,
+        LocalEvents::MessageDeleted(Box::new(decoded_message)),
+    );
 }
