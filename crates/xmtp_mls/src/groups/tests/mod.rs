@@ -75,7 +75,7 @@ use xmtp_db::schema::groups;
 use xmtp_db::{
     consent_record::ConsentState,
     group::{ConversationType, GroupQueryArgs},
-    group_intent::IntentState,
+    group_intent::{IntentKind, IntentState},
     group_message::{GroupMessageKind, MsgQueryArgs, StoredGroupMessage},
     prelude::*,
 };
@@ -3579,7 +3579,7 @@ async fn skip_already_processed_intents() {
         .send_message(&[2], SendMessageOpts::default())
         .await
         .unwrap();
-    let intent = bo_client
+    let processed_intents_before = bo_client
         .context
         .db()
         .find_group_intents(
@@ -3588,10 +3588,65 @@ async fn skip_already_processed_intents() {
             None,
         )
         .unwrap();
-    assert_eq!(intent.len(), 2); //key_update and send_message
+    assert_eq!(processed_intents_before.len(), 2); // key_update and send_message
+    let send_intent = processed_intents_before
+        .iter()
+        .find(|intent| intent.kind == IntentKind::SendMessage)
+        .unwrap();
+    let send_intent_cursor = (send_intent.sequence_id, send_intent.originator_id);
+    let messages_before = bo_group.find_messages(&MsgQueryArgs::default()).unwrap();
 
-    let process_result = bo_group.sync_until_intent_resolved(intent[1].id).await;
+    let process_result = bo_group.sync_until_intent_resolved(send_intent.id).await;
     assert_ok!(process_result);
+
+    let processed_intents_after = bo_client
+        .context
+        .db()
+        .find_group_intents(
+            bo_group.clone().group_id,
+            Some(vec![IntentState::Processed]),
+            None,
+        )
+        .unwrap();
+    assert_eq!(processed_intents_after.len(), processed_intents_before.len());
+    let send_intent_after = processed_intents_after
+        .iter()
+        .find(|intent| intent.id == send_intent.id)
+        .unwrap();
+    assert_eq!(send_intent_after.state, IntentState::Processed);
+    assert_eq!(
+        (send_intent_after.sequence_id, send_intent_after.originator_id),
+        send_intent_cursor
+    );
+
+    let unresolved_intents = bo_client
+        .context
+        .db()
+        .find_group_intents(
+            bo_group.clone().group_id,
+            Some(vec![
+                IntentState::ToPublish,
+                IntentState::Published,
+                IntentState::Committed,
+                IntentState::Error,
+            ]),
+            None,
+        )
+        .unwrap();
+    assert!(unresolved_intents.is_empty());
+
+    let messages_after = bo_group.find_messages(&MsgQueryArgs::default()).unwrap();
+    assert_eq!(messages_after.len(), messages_before.len());
+    assert_eq!(
+        messages_after
+            .iter()
+            .map(|message| message.id.clone())
+            .collect::<Vec<_>>(),
+        messages_before
+            .iter()
+            .map(|message| message.id.clone())
+            .collect::<Vec<_>>()
+    );
 }
 
 #[xmtp_common::test(flavor = "multi_thread")]
