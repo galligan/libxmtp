@@ -29,6 +29,7 @@ use xmtp_db::{
     consent_record::{ConsentState, StoredConsentRecord},
     group::{ConversationType, GroupMembershipState, StoredGroup},
     group_message::{DeliveryStatus, GroupMessageKind, StoredGroupMessage},
+    pending_remove::PendingRemove,
     prelude::*,
     refresh_state::EntityKind,
 };
@@ -425,6 +426,17 @@ where
                 "User is being re-added after leaving/removal, setting membership state to ALLOWED"
             );
             GroupMembershipState::Allowed
+        } else if existing_group.is_none()
+            && added_by_inbox_id == context.inbox_id()
+            && welcome_metadata
+                .map(|m| m.added_by_inbox_is_pending_remove)
+                .unwrap_or(false)
+        {
+            tracing::info!(
+                group_id = hex::encode(&group_id),
+                "Same-inbox installation welcome inherits pending-remove state"
+            );
+            GroupMembershipState::PendingRemove
         } else {
             tracing::debug!(
                 group_id = hex::encode(&group_id),
@@ -530,13 +542,28 @@ where
             }
         });
 
-        let cursor = welcome_metadata
+        let welcome_message_cursor = welcome_metadata
             .map(|m| m.message_cursor as i64)
             .unwrap_or_default();
+        let added_by_inbox_is_pending_remove = welcome_metadata
+            .map(|m| m.added_by_inbox_is_pending_remove)
+            .unwrap_or(false);
+
+        let is_same_inbox_installation_welcome =
+            existing_group.is_none() && added_by_inbox_id == current_inbox_id;
+        let should_inherit_pending_remove =
+            is_same_inbox_installation_welcome && added_by_inbox_is_pending_remove;
+        let commit_cursor_to_store = if is_same_inbox_installation_welcome {
+            // Same-inbox installation welcomes need to replay commit history so local-only
+            // membership state like PendingRemove can be reconstructed on the new install.
+            0
+        } else {
+            welcome_message_cursor
+        };
 
         // this is the commit that brought us into the group
         let added_msg = StoredGroupMessage {
-            id: added_message_id,
+            id: added_message_id.clone(),
             group_id: stored_group.id.clone(),
             decrypted_message_bytes: encoded_added_payload_bytes,
             sent_at_ns: welcome.timestamp(),
@@ -549,7 +576,7 @@ where
             version_minor: added_content_type.version_minor as i32,
             authority_id: added_content_type.authority_id,
             reference_id: None,
-            sequence_id: cursor,
+            sequence_id: welcome_message_cursor,
             originator_id: Originators::MLS_COMMITS as i64,
             expire_at_ns: None,
             inserted_at_ns: 0, // Will be set by database
@@ -557,6 +584,15 @@ where
         };
 
         added_msg.store_or_ignore(&db)?;
+
+        if should_inherit_pending_remove {
+            PendingRemove {
+                group_id: stored_group.id.clone(),
+                inbox_id: current_inbox_id.clone(),
+                message_id: added_message_id.clone(),
+            }
+            .store_or_ignore(&db)?;
+        }
 
         tracing::info!(
             "[{}]: Created GroupUpdated message for welcome",
@@ -589,13 +625,13 @@ where
             EntityKind::CommitMessage,
             //TODO:d14n this must change before D14n-only
             //Originator must be included in welcome
-            Cursor::mls_commits(cursor as u64),
+            Cursor::mls_commits(commit_cursor_to_store as u64),
         )?;
         MlsGroup::<C>::mark_readd_requests_as_responded(
             &storage,
             &group.group_id,
             &HashSet::from([context.installation_id().to_vec()]),
-            cursor,
+            welcome_message_cursor,
         )?;
 
         tracing::info!(
@@ -604,7 +640,8 @@ where
             group_id = %hex::encode(&group.group_id),
             welcome_id = welcome.cursor.sequence_id,
             originator_id = welcome.cursor.originator_id,
-            cursor = cursor,
+            welcome_cursor = welcome_message_cursor,
+            stored_commit_cursor = commit_cursor_to_store,
             "updated message cursor from welcome metadata"
         );
 

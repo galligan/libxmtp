@@ -270,7 +270,10 @@ fn test_welcome_pointer_encryption_round_trip() {
     // Create test data (welcome message and metadata)
     let welcome_data = xmtp_common::rand_vec::<1000>();
     let message_cursor = xmtp_common::rand_u64();
-    let welcome_metadata = WelcomeMetadata { message_cursor };
+    let welcome_metadata = WelcomeMetadata {
+        message_cursor,
+        added_by_inbox_is_pending_remove: false,
+    };
     let welcome_metadata_bytes = welcome_metadata.encode_to_vec();
 
     // Get available AEAD types for welcome pointers
@@ -603,7 +606,10 @@ async fn test_welcome_pointer_task_retry_resolution() {
     )
     .unwrap();
     let welcome_metadata = wrap_welcome_symmetric(
-        WelcomeMetadata { message_cursor: 0 }
+        WelcomeMetadata {
+            message_cursor: 0,
+            added_by_inbox_is_pending_remove: false,
+        }
             .encode_to_vec()
             .as_slice(),
         WelcomePointersExtension::preferred_type(),
