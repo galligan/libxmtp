@@ -3715,6 +3715,129 @@ async fn skip_already_processed_intents() {
 }
 
 #[xmtp_common::test]
+async fn self_leave_request_resolution_is_idempotent() {
+    tester!(amal);
+    tester!(bola);
+
+    let amal_group = amal.create_group(None, None).unwrap();
+    amal_group.add_members(&[bola.inbox_id()]).await.unwrap();
+
+    amal_group.sync().await.unwrap();
+    bola.sync_welcomes().await.unwrap();
+
+    let bola_groups = bola.find_groups(GroupQueryArgs::default()).unwrap();
+    let bola_group = bola_groups.first().unwrap();
+    bola_group.sync().await.unwrap();
+
+    let processed_send_intents_before = bola
+        .context
+        .db()
+        .find_group_intents(
+            bola_group.group_id.clone(),
+            Some(vec![IntentState::Processed]),
+            Some(vec![IntentKind::SendMessage]),
+        )
+        .unwrap();
+    assert!(processed_send_intents_before.is_empty());
+
+    bola_group.leave_group().await.unwrap();
+
+    let processed_send_intents_after = bola
+        .context
+        .db()
+        .find_group_intents(
+            bola_group.group_id.clone(),
+            Some(vec![IntentState::Processed]),
+            Some(vec![IntentKind::SendMessage]),
+        )
+        .unwrap();
+    assert_eq!(processed_send_intents_after.len(), 1);
+    let leave_intent = processed_send_intents_after.first().unwrap();
+    let leave_intent_cursor = (leave_intent.sequence_id, leave_intent.originator_id);
+
+    let messages_before = bola_group.find_messages(&MsgQueryArgs::default()).unwrap();
+    let leave_delivery_before = messages_before
+        .iter()
+        .find(|message| message.content_type == ContentType::LeaveRequest)
+        .map(|message| message.delivery_status)
+        .unwrap();
+
+    let pending_remove_before_replay = bola
+        .db()
+        .get_pending_remove_users(&bola_group.group_id)
+        .unwrap();
+    assert_eq!(pending_remove_before_replay.len(), 1);
+    assert!(pending_remove_before_replay.contains(&bola.inbox_id().to_string()));
+    assert_eq!(bola_group.membership_state().unwrap(), GroupMembershipState::PendingRemove);
+
+    let process_result = bola_group.sync_until_intent_resolved(leave_intent.id).await;
+    assert_ok!(process_result);
+
+    let processed_send_intents_after_replay = bola
+        .context
+        .db()
+        .find_group_intents(
+            bola_group.group_id.clone(),
+            Some(vec![IntentState::Processed]),
+            Some(vec![IntentKind::SendMessage]),
+        )
+        .unwrap();
+    assert_eq!(processed_send_intents_after_replay.len(), 1);
+    let leave_intent_after_replay = processed_send_intents_after_replay.first().unwrap();
+    assert_eq!(leave_intent_after_replay.state, IntentState::Processed);
+    assert_eq!(
+        (
+            leave_intent_after_replay.sequence_id,
+            leave_intent_after_replay.originator_id
+        ),
+        leave_intent_cursor
+    );
+
+    let unresolved_intents = bola
+        .context
+        .db()
+        .find_group_intents(
+            bola_group.group_id.clone(),
+            Some(vec![
+                IntentState::ToPublish,
+                IntentState::Published,
+                IntentState::Committed,
+                IntentState::Error,
+            ]),
+            Some(vec![IntentKind::SendMessage]),
+        )
+        .unwrap();
+    assert!(unresolved_intents.is_empty());
+
+    let messages_after = bola_group.find_messages(&MsgQueryArgs::default()).unwrap();
+    assert_eq!(messages_after.len(), messages_before.len());
+    assert_eq!(
+        messages_after
+            .iter()
+            .map(|message| message.id.clone())
+            .collect::<Vec<_>>(),
+        messages_before
+            .iter()
+            .map(|message| message.id.clone())
+            .collect::<Vec<_>>()
+    );
+    let leave_delivery_after = messages_after
+        .iter()
+        .find(|message| message.content_type == ContentType::LeaveRequest)
+        .map(|message| message.delivery_status)
+        .unwrap();
+    assert_eq!(leave_delivery_before, DeliveryStatus::Published);
+    assert_eq!(leave_delivery_after, DeliveryStatus::Published);
+
+    let pending_remove_after_replay = bola
+        .db()
+        .get_pending_remove_users(&bola_group.group_id)
+        .unwrap();
+    assert_eq!(pending_remove_after_replay, pending_remove_before_replay);
+    assert_eq!(bola_group.membership_state().unwrap(), GroupMembershipState::PendingRemove);
+}
+
+#[xmtp_common::test]
 async fn external_leave_request_sync_is_idempotent() {
     tester!(amal);
     tester!(bola);
