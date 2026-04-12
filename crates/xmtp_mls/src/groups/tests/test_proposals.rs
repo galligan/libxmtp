@@ -272,6 +272,96 @@ async fn test_e2e_propose_add_member_flow() {
     );
 }
 
+/// Test that an externally received proposal survives a group reload because it is
+/// explicitly persisted during sync, rather than only living in the in-memory MLS group.
+#[xmtp_common::test(unwrap_try = true)]
+async fn test_external_proposal_survives_group_reload() {
+    tester!(alix);
+    tester!(bo);
+    tester!(caro);
+
+    let alix_group = alix
+        .create_group_with_members(&[bo.inbox_id()], None, None)
+        .await?;
+
+    let bo_groups = bo.sync_welcomes().await?;
+    let bo_group = bo_groups.first()?;
+    bo_group.sync().await?;
+
+    alix_group.enable_proposals().await?;
+    bo_group.sync().await?;
+
+    let intent_data =
+        ProposeMemberUpdateIntentData::new(vec![caro.inbox_id().to_string()], vec![]).try_into()?;
+    let alix_db = alix_group.context.db();
+    let propose_intent =
+        alix_db.insert_group_intent(xmtp_db::group_intent::NewGroupIntent::new(
+            IntentKind::ProposeMemberUpdate,
+            alix_group.group_id.clone(),
+            intent_data,
+            false,
+        ))?;
+
+    alix_group
+        .sync_until_intent_resolved(propose_intent.id)
+        .await?;
+    bo_group.sync().await?;
+
+    let pending_before_reload = bo_group
+        .load_mls_group_with_lock_async(async |openmls_group| {
+            Ok::<usize, crate::groups::GroupError>(openmls_group.pending_proposals().count())
+        })
+        .await?;
+    assert_eq!(
+        pending_before_reload, 1,
+        "Bo should have exactly one pending proposal before reload"
+    );
+
+    let bo_group_id = bo_group.group_id.clone();
+    let reloaded_group = bo.group(&bo_group_id)?;
+    let pending_after_reload = reloaded_group
+        .load_mls_group_with_lock_async(async |openmls_group| {
+            Ok::<usize, crate::groups::GroupError>(openmls_group.pending_proposals().count())
+        })
+        .await?;
+    assert_eq!(
+        pending_after_reload, pending_before_reload,
+        "Reloaded group should retain persisted pending proposals"
+    );
+
+    let bo_db = reloaded_group.context.db();
+    let commit_intent = bo_db.insert_group_intent(xmtp_db::group_intent::NewGroupIntent::new(
+        IntentKind::CommitPendingProposals,
+        reloaded_group.group_id.clone(),
+        CommitPendingProposalsIntentData::default().into(),
+        false,
+    ))?;
+
+    reloaded_group
+        .sync_until_intent_resolved(commit_intent.id)
+        .await?;
+
+    let pending_after_commit = reloaded_group
+        .load_mls_group_with_lock_async(async |openmls_group| {
+            Ok::<usize, crate::groups::GroupError>(openmls_group.pending_proposals().count())
+        })
+        .await?;
+    assert_eq!(pending_after_commit, 0);
+
+    alix_group.sync().await?;
+    let caro_groups = caro.sync_welcomes().await?;
+    let caro_group = caro_groups.first()?;
+    caro_group.sync().await?;
+
+    let caro_members = caro_group.members().await?;
+    assert_eq!(caro_members.len(), 3);
+    assert!(
+        caro_members
+            .iter()
+            .any(|member| member.inbox_id == caro.inbox_id())
+    );
+}
+
 /// Test end-to-end proposal remove flow:
 /// 1. Create group with 3 members
 /// 2. Alix proposes to remove Caro
