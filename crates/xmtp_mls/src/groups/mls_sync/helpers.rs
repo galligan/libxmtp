@@ -123,18 +123,22 @@ pub(crate) fn decode_staged_commit(
 pub(super) fn handle_published_intent_send_failure<Db: QueryGroupIntent>(
     db: &Db,
     intent: &StoredGroupIntent,
+    is_retryable: bool,
 ) -> Result<(), GroupError> {
-    if (intent.publish_attempts + 1) as usize >= MAX_INTENT_PUBLISH_ATTEMPTS {
+    if !is_retryable {
         tracing::error!(
             intent.id,
             intent.kind = %intent.kind,
-            "intent {} has reached max publish attempts",
+            "intent {} failed to publish with a non-retryable error",
             intent.id
         );
         let id = utils::id::calculate_message_id_for_intent(intent)?;
         db.set_group_intent_error_and_fail_msg(intent, id)?;
     } else {
         // Reset so the next retry re-encrypts at the current epoch.
+        //
+        // Retryable transport failures should not permanently poison the intent,
+        // even if we have already burned through multiple sync attempts in a row.
         db.increment_intent_publish_attempt_count(intent.id)?;
         db.set_group_intent_to_publish(intent.id)?;
     }

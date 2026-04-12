@@ -164,7 +164,11 @@ where
                                     err = ?err
                                 );
 
-                                handle_published_intent_send_failure(&db, &intent)?;
+                                handle_published_intent_send_failure(
+                                    &db,
+                                    &intent,
+                                    err.is_retryable(),
+                                )?;
                                 return Err(err)?;
                             }
                             (kind, Ok(_)) => {
