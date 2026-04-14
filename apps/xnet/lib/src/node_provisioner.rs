@@ -75,8 +75,15 @@ impl NodeProvisioner {
     /// 7. Register and enable the node on-chain via [`XmtpdCli`].
     /// 8. Start the container via [`ServiceManager`].
     pub async fn provision(&self, mgr: &mut ServiceManager) -> Result<XmtpdNode> {
-        // 1. If migrator, ensure broadcasters are paused
+        // 1. If migrator, validate preconditions before any state changes
         if self.migrator {
+            // V3 stack must be running — migrator nodes need node-go
+            if mgr.node_go.is_none() {
+                return Err(eyre!(
+                    "cannot provision migrator node: V3 stack is disabled (enable_v3 required)"
+                ));
+            }
+
             let rpc_url = mgr
                 .anvil_rpc_url()
                 .ok_or_else(|| eyre!("anvil RPC URL not available"))?
