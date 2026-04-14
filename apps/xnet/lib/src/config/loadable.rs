@@ -176,9 +176,16 @@ impl Config {
                 AddressMode::Local
             };
 
+            // Merge CLI --paused flag with TOML paused setting
+            let cli_paused = matches!(
+                app.args.cmd,
+                Some(crate::config::Commands::Up(crate::config::Up { paused: true }))
+            );
+            let paused = cli_paused || toml.xnet.paused;
+
             let mut c = Config::builder()
                 .use_standard_ports(toml.xnet.use_standard_ports)
-                .paused(toml.xnet.paused)
+                .paused(paused)
                 .signers(signers)
                 .migration(toml.migration)
                 .xmtpd(toml.xmtpd.image)

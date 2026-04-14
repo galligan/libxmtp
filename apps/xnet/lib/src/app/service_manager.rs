@@ -151,6 +151,19 @@ impl ServiceManager {
             None
         };
 
+        // Phase 6b: Pause broadcasters if configured (must happen before Phase 7 node provisioning)
+        if config.paused {
+            if let Some(ref rpc) = anvil_rpc_url {
+                crate::contracts::set_broadcasters_paused(
+                    rpc.as_str(),
+                    crate::constants::Anvil::ADMIN_KEY,
+                    true,
+                )
+                .await?;
+                info!("broadcaster contracts paused");
+            }
+        }
+
         let mut this = Self {
             node_go,
             coredns,
