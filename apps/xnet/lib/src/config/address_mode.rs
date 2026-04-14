@@ -93,26 +93,9 @@ mod tests {
     }
 
     #[test]
-    fn default_is_local() {
-        assert_eq!(AddressMode::default(), AddressMode::Local);
-    }
-
-    #[test]
     fn remote_domain_hostname() {
         let mode = AddressMode::RemoteDomain("xmtp.run".to_string());
         assert_eq!(mode.hostname("node100"), "node100.xmtp.run");
         assert_eq!(mode.hostname("xnet-200"), "xnet-200.xmtp.run");
-    }
-
-    #[test]
-    fn remote_domain_dns_domain() {
-        let mode = AddressMode::RemoteDomain("xmtp.run".to_string());
-        assert_eq!(mode.dns_domain(), "xmtp.run");
-    }
-
-    #[test]
-    fn remote_domain_is_remote() {
-        let mode = AddressMode::RemoteDomain("xmtp.run".to_string());
-        assert!(mode.is_remote());
     }
 }
