@@ -140,7 +140,10 @@ impl ServiceManager {
                 crate::config::AddressMode::RemoteIp(ip) => {
                     anvil_rpc.to_string().replace("localhost", &ip.to_string())
                 }
-                _ => anvil_rpc.to_string(),
+                crate::config::AddressMode::RemoteDomain(domain) => {
+                    anvil_rpc.to_string().replace("localhost", domain)
+                }
+                crate::config::AddressMode::Local => anvil_rpc.to_string(),
             };
             let mut ot = Otterscan::builder()
                 .anvil_host(anvil_host_for_browser)

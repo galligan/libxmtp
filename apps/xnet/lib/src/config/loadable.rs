@@ -179,7 +179,9 @@ impl Config {
             // Merge CLI --paused flag with TOML paused setting
             let cli_paused = matches!(
                 app.args.cmd,
-                Some(crate::config::Commands::Up(crate::config::Up { paused: true }))
+                Some(crate::config::Commands::Up(crate::config::Up {
+                    paused: true
+                }))
             );
             let paused = cli_paused || toml.xnet.paused;
 

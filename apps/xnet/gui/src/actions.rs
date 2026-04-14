@@ -135,7 +135,12 @@ pub async fn execute_delete() -> Result<()> {
 }
 
 pub async fn execute_add_node() -> Result<NodeInfo> {
-    let node = App::parse()?.add_node(&AddNode { migrator: false, use_standard_port: false }).await?;
+    let node = App::parse()?
+        .add_node(&AddNode {
+            migrator: false,
+            use_standard_port: false,
+        })
+        .await?;
     let config = xnet::Config::load()?;
     Ok(NodeInfo {
         id: *node.id(),
@@ -154,15 +159,16 @@ pub async fn execute_add_migrator() -> Result<NodeInfo> {
     let rpc = mgr
         .anvil_rpc_url()
         .ok_or_else(|| color_eyre::eyre::eyre!("Anvil not running"))?;
-    xnet::contracts::set_broadcasters_paused(
-        rpc.as_str(),
-        xnet::constants::Anvil::ADMIN_KEY,
-        true,
-    )
-    .await?;
+    xnet::contracts::set_broadcasters_paused(rpc.as_str(), xnet::constants::Anvil::ADMIN_KEY, true)
+        .await?;
     tracing::info!("broadcaster contracts paused for migrator node");
 
-    let node = App::parse()?.add_node(&AddNode { migrator: true, use_standard_port: false }).await?;
+    let node = App::parse()?
+        .add_node(&AddNode {
+            migrator: true,
+            use_standard_port: false,
+        })
+        .await?;
     let config = xnet::Config::load()?;
     Ok(NodeInfo {
         id: *node.id(),
