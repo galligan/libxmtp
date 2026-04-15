@@ -47,6 +47,8 @@ struct HttpConfig {
     services: HashMap<String, TraefikService>,
     #[serde(rename = "serversTransports", skip_serializing_if = "Option::is_none")]
     servers_transports: Option<HashMap<String, ServersTransport>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    middlewares: Option<HashMap<String, Middleware>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -55,6 +57,12 @@ struct Router {
     service: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     priority: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tls: Option<TlsConfig>,
+    #[serde(rename = "entryPoints", skip_serializing_if = "Option::is_none")]
+    entry_points: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    middlewares: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -75,6 +83,24 @@ struct LoadBalancer {
 #[derive(Debug, Serialize, Deserialize)]
 struct Server {
     url: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TlsConfig {
+    #[serde(rename = "certResolver", skip_serializing_if = "Option::is_none")]
+    cert_resolver: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Middleware {
+    #[serde(rename = "redirectScheme", skip_serializing_if = "Option::is_none")]
+    redirect_scheme: Option<RedirectScheme>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RedirectScheme {
+    scheme: String,
+    permanent: bool,
 }
 
 impl TraefikConfig {
@@ -227,6 +253,9 @@ impl TraefikConfig {
                     rule: format!("Host(`{}`)", hostname),
                     service: name.clone(),
                     priority: None,
+                    tls: None,
+                    entry_points: None,
+                    middlewares: None,
                 },
             );
 
@@ -245,15 +274,53 @@ impl TraefikConfig {
         }
 
         // Extra routes (user-defined, may use any URL/rule)
+        let mut middlewares = HashMap::new();
+        let mut any_tls = false;
+
         for route in extra.iter() {
-            routers.insert(
-                route.name.clone(),
-                Router {
-                    rule: route.rule.clone(),
-                    service: route.name.clone(),
-                    priority: route.priority,
-                },
-            );
+            if route.tls {
+                any_tls = true;
+
+                // HTTPS router with cert resolver
+                routers.insert(
+                    route.name.clone(),
+                    Router {
+                        rule: route.rule.clone(),
+                        service: route.name.clone(),
+                        priority: route.priority,
+                        tls: Some(TlsConfig {
+                            cert_resolver: Some("letsencrypt".to_string()),
+                        }),
+                        entry_points: Some(vec!["https".to_string()]),
+                        middlewares: None,
+                    },
+                );
+
+                // HTTP → HTTPS redirect router
+                routers.insert(
+                    format!("{}-redirect", route.name),
+                    Router {
+                        rule: route.rule.clone(),
+                        service: route.name.clone(),
+                        priority: route.priority,
+                        entry_points: Some(vec!["http".to_string()]),
+                        middlewares: Some(vec!["redirect-https".to_string()]),
+                        tls: None,
+                    },
+                );
+            } else {
+                routers.insert(
+                    route.name.clone(),
+                    Router {
+                        rule: route.rule.clone(),
+                        service: route.name.clone(),
+                        priority: route.priority,
+                        tls: None,
+                        entry_points: None,
+                        middlewares: None,
+                    },
+                );
+            }
 
             services.insert(
                 route.name.clone(),
@@ -269,11 +336,29 @@ impl TraefikConfig {
             );
         }
 
+        // Insert redirect middleware once if any route uses TLS
+        if any_tls {
+            middlewares.insert(
+                "redirect-https".to_string(),
+                Middleware {
+                    redirect_scheme: Some(RedirectScheme {
+                        scheme: "https".to_string(),
+                        permanent: true,
+                    }),
+                },
+            );
+        }
+
         let config = TraefikDynamicConfig {
             http: HttpConfig {
                 routers,
                 services,
                 servers_transports: None,
+                middlewares: if middlewares.is_empty() {
+                    None
+                } else {
+                    Some(middlewares)
+                },
             },
         };
 
@@ -478,5 +563,105 @@ mod tests {
         // Extra routes Vec should be empty on fresh load
         let extra = config2.extra_routes.lock().unwrap();
         assert!(extra.is_empty());
+    }
+
+    #[test]
+    fn tls_route_generates_router_with_cert_resolver_and_redirect() {
+        let (config, file) = temp_config();
+        config
+            .set_extra_routes(vec![ExtraTraefikRoute {
+                name: "status-page".to_string(),
+                rule: "Host(`migrate.xmtp.run`)".to_string(),
+                url: "http://xnet-status:8899".to_string(),
+                priority: Some(100),
+                tls: true,
+            }])
+            .unwrap();
+
+        let contents = fs::read_to_string(file.path()).unwrap();
+        let parsed: TraefikDynamicConfig = serde_yaml::from_str(&contents).unwrap();
+
+        // HTTPS router with certResolver
+        let router = parsed.http.routers.get("status-page").expect("HTTPS router missing");
+        assert_eq!(router.entry_points, Some(vec!["https".to_string()]));
+        let tls = router.tls.as_ref().expect("tls config missing");
+        assert_eq!(tls.cert_resolver, Some("letsencrypt".to_string()));
+
+        // HTTP→HTTPS redirect router
+        let redirect = parsed.http.routers.get("status-page-redirect").expect("redirect router missing");
+        assert_eq!(redirect.entry_points, Some(vec!["http".to_string()]));
+        assert_eq!(redirect.middlewares, Some(vec!["redirect-https".to_string()]));
+        assert!(redirect.tls.is_none());
+
+        // Redirect middleware
+        let mw = parsed.http.middlewares.as_ref().expect("middlewares missing");
+        let rs = mw.get("redirect-https").expect("redirect-https middleware missing");
+        let scheme = rs.redirect_scheme.as_ref().expect("redirectScheme missing");
+        assert_eq!(scheme.scheme, "https");
+        assert!(scheme.permanent);
+
+        // Service exists
+        let svc = parsed.http.services.get("status-page").expect("service missing");
+        assert_eq!(svc.load_balancer.servers[0].url, "http://xnet-status:8899");
+    }
+
+    #[test]
+    fn non_tls_route_has_no_tls_fields() {
+        let (config, file) = temp_config();
+        config
+            .set_extra_routes(vec![ExtraTraefikRoute {
+                name: "grafana".to_string(),
+                rule: "Host(`grafana.xmtp.run`)".to_string(),
+                url: "http://xnet-grafana:3000".to_string(),
+                priority: None,
+                tls: false,
+            }])
+            .unwrap();
+
+        let contents = fs::read_to_string(file.path()).unwrap();
+        let parsed: TraefikDynamicConfig = serde_yaml::from_str(&contents).unwrap();
+
+        let router = parsed.http.routers.get("grafana").expect("router missing");
+        assert!(router.tls.is_none());
+        assert!(router.entry_points.is_none());
+        assert!(router.middlewares.is_none());
+
+        // No redirect router
+        assert!(parsed.http.routers.get("grafana-redirect").is_none());
+    }
+
+    #[test]
+    fn mixed_tls_and_non_tls_routes() {
+        let (config, file) = temp_config();
+        config
+            .set_extra_routes(vec![
+                ExtraTraefikRoute {
+                    name: "status-page".to_string(),
+                    rule: "Host(`migrate.xmtp.run`)".to_string(),
+                    url: "http://xnet-status:8899".to_string(),
+                    priority: Some(100),
+                    tls: true,
+                },
+                ExtraTraefikRoute {
+                    name: "grafana".to_string(),
+                    rule: "Host(`grafana.xmtp.run`)".to_string(),
+                    url: "http://xnet-grafana:3000".to_string(),
+                    priority: None,
+                    tls: false,
+                },
+            ])
+            .unwrap();
+
+        let contents = fs::read_to_string(file.path()).unwrap();
+        let parsed: TraefikDynamicConfig = serde_yaml::from_str(&contents).unwrap();
+
+        // TLS route: main + redirect = 2 routers, non-TLS: 1 router => total 3
+        assert_eq!(parsed.http.routers.len(), 3);
+        assert!(parsed.http.routers.contains_key("status-page"));
+        assert!(parsed.http.routers.contains_key("status-page-redirect"));
+        assert!(parsed.http.routers.contains_key("grafana"));
+
+        // Only 2 services (redirect router shares the service)
+        assert_eq!(parsed.http.services.len(), 2);
     }
 }
