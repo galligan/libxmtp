@@ -320,6 +320,11 @@ pub struct BackendOpts {
     /// Enable the decentralization backend
     #[arg(short, long)]
     pub d14n: bool,
+    /// Connect reads directly to a single xmtpd node for D14n, bypassing MultiNodeClient
+    /// gateway discovery. Writes still route through --xmtpd-gateway-url.
+    /// Requires --d14n.
+    #[arg(long, requires = "d14n")]
+    pub d14n_host: Option<url::Url>,
     /// Use the perf gateway (closest-node selection) instead of the default gateway.
     /// Requires --d14n.
     #[arg(short, long, requires = "d14n")]
@@ -388,12 +393,20 @@ impl BackendOpts {
         }
         if self.d14n {
             let xmtpd_gateway_host = self.xmtpd_gateway_url()?;
-            trace!(url = %network, xmtpd_gateway = %xmtpd_gateway_host,  "create grpc");
-            Ok(builder
-                .gateway_host(xmtpd_gateway_host.as_str())
-                .build_d14n()?)
+            if let Some(ref d14n_host) = self.d14n_host {
+                trace!(d14n_host = %d14n_host, xmtpd_gateway = %xmtpd_gateway_host, "create single-node d14n grpc");
+                Ok(builder
+                    .v3_host(d14n_host.as_str())
+                    .gateway_host(xmtpd_gateway_host.as_str())
+                    .build_d14n_single()?)
+            } else {
+                trace!(url = %network, xmtpd_gateway = %xmtpd_gateway_host, "create grpc");
+                Ok(builder
+                    .gateway_host(xmtpd_gateway_host.as_str())
+                    .build_d14n()?)
+            }
         } else {
-            trace!(url = %network,  "create grpc");
+            trace!(url = %network, "create grpc");
             Ok(builder.build_v3()?)
         }
     }
@@ -409,10 +422,18 @@ impl BackendOpts {
         }
         if self.d14n {
             let xmtpd_gateway_host = self.xmtpd_gateway_url()?;
-            trace!(url = %network, xmtpd_gateway = %xmtpd_gateway_host, "create grpc");
-            Ok(builder
-                .gateway_host(xmtpd_gateway_host.as_str())
-                .build_d14n()?)
+            if let Some(ref d14n_host) = self.d14n_host {
+                trace!(d14n_host = %d14n_host, xmtpd_gateway = %xmtpd_gateway_host, "create single-node d14n grpc");
+                Ok(builder
+                    .v3_host(d14n_host.as_str())
+                    .gateway_host(xmtpd_gateway_host.as_str())
+                    .build_d14n_single()?)
+            } else {
+                trace!(url = %network, xmtpd_gateway = %xmtpd_gateway_host, "create grpc");
+                Ok(builder
+                    .gateway_host(xmtpd_gateway_host.as_str())
+                    .build_d14n()?)
+            }
         } else {
             trace!(url = %network, "create grpc");
             Ok(builder.build_v3()?)
