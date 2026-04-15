@@ -228,6 +228,91 @@ impl ClientBundleBuilder {
         Ok(ClientBundle::d14n(client, app_version))
     }
 
+    /// Build a D14n client that reads from a single node directly and writes to the gateway.
+    /// Requires both `v3_host` (the direct node URL) and `gateway_host` (for writes).
+    /// Skips `MultiNodeClient` — no gateway-based node discovery for reads.
+    fn inner_build_d14n_single(
+        &mut self,
+    ) -> Result<(ArcClient, Option<xmtp_proto::types::AppVersion>), MessageBackendBuilderError>
+    {
+        let Self {
+            app_version,
+            auth_callback,
+            auth_handle,
+            ..
+        } = self.clone();
+        let v3_host = self
+            .v3_host
+            .as_ref()
+            .ok_or(MessageBackendBuilderError::MissingV3Host)?;
+        let gw_host = self
+            .gateway_host
+            .as_ref()
+            .ok_or(MessageBackendBuilderError::MissingGatewayHost)?;
+        let readonly = self.readonly.unwrap_or_default();
+
+        // Build the direct node client (for reads)
+        let mut read_builder = GrpcClient::builder();
+        read_builder.set_host(
+            v3_host
+                .parse()
+                .map_err(|e| MessageBackendBuilderError::invalid_url(e, v3_host.clone()))?,
+        );
+        if let Some(ref version) = app_version {
+            read_builder.set_app_version(version.clone())?;
+        }
+        let read_client = read_builder.build()?;
+        let read_client = if auth_callback.is_some() || auth_handle.is_some() {
+            crate::AuthMiddleware::new(read_client, auth_callback.clone(), auth_handle.clone())
+                .arced()
+        } else {
+            read_client.arced()
+        };
+
+        if readonly {
+            return Ok((
+                ReadonlyClient::builder()
+                    .inner(read_client)
+                    .build()?
+                    .arced(),
+                app_version,
+            ));
+        }
+
+        // Build the gateway client (for writes)
+        let mut write_builder = GrpcClient::builder();
+        write_builder.set_host(
+            gw_host
+                .parse()
+                .map_err(|e| MessageBackendBuilderError::invalid_url(e, gw_host.clone()))?,
+        );
+        if let Some(ref version) = app_version {
+            write_builder.set_app_version(version.clone())?;
+        }
+        let write_client = write_builder.build()?;
+        let write_client = if auth_callback.is_some() || auth_handle.is_some() {
+            crate::AuthMiddleware::new(write_client, auth_callback, auth_handle).arced()
+        } else {
+            write_client.arced()
+        };
+
+        let client = ReadWriteClient::builder()
+            .read(read_client)
+            .write(write_client)
+            .filter(PAYER_WRITE_FILTER)
+            .build()?;
+
+        Ok((client.arced(), app_version))
+    }
+
+    /// Build a D14n client using a single node for reads (no MultiNodeClient).
+    /// Writes still route to the gateway.
+    /// Requires both `v3_host` and `gateway_host`.
+    pub fn build_d14n_single(&mut self) -> Result<ClientBundle, MessageBackendBuilderError> {
+        let (client, app_version) = self.inner_build_d14n_single()?;
+        Ok(ClientBundle::d14n(client, app_version))
+    }
+
     fn inner_build_v3(&mut self) -> Result<ArcClient, MessageBackendBuilderError> {
         let v3_host = self
             .v3_host
