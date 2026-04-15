@@ -22,14 +22,18 @@ use url::Url;
 use crate::{
     Config,
     config::NodeToml,
+    config::toml_config::AcmeConfig,
     constants::{MAX_XMTPD_NODES, Traefik as TraefikConst, Xmtpd as XmtpdConst},
     network::XNET_NETWORK_NAME,
     services::{ManagedContainer, Service, ToxiProxy, TraefikConfig, expose, expose_127},
 };
 
-/// Traefik static configuration (traefik.yml)
-/// Listens on both port 80 and 443 since gRPC clients may default to 443
-const TRAEFIK_STATIC_CONFIG: &str = r#"# Traefik static configuration
+/// Generate Traefik static configuration (traefik.yml).
+///
+/// When `acme` is provided, appends a `certificatesResolvers` block
+/// for Let's Encrypt using the HTTP challenge on the `http` entrypoint.
+fn traefik_static_config(acme: Option<&AcmeConfig>) -> String {
+    let mut yaml = r#"# Traefik static configuration
 entryPoints:
   http:
     address: ":80"
@@ -61,7 +65,26 @@ log:
   level: INFO
 
 accessLog: {}
-"#;
+"#
+    .to_string();
+
+    if let Some(acme) = acme {
+        yaml.push_str(&format!(
+            r#"
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      email: "{}"
+      storage: "{}"
+      httpChallenge:
+        entryPoint: http
+"#,
+            acme.email, acme.storage
+        ));
+    }
+
+    yaml
+}
 
 /// Manages a Traefik Docker container for reverse proxy routing.
 #[derive(Builder)]
@@ -82,6 +105,10 @@ pub struct Traefik {
     /// Path to dynamic config file (managed by TraefikConfig)
     #[builder(default = "/tmp/xnet/traefik/dynamic.yml".to_string())]
     dynamic_config_path: String,
+
+    /// ACME/TLS configuration (None = no cert management)
+    #[builder(default)]
+    acme: Option<AcmeConfig>,
 
     /// The host port for HTTP traffic (default: 80)
     #[builder(default = TraefikConst::HTTP_PORT)]
@@ -112,7 +139,7 @@ impl Traefik {
         fs::create_dir_all(config_dir)?;
 
         // Write static config
-        fs::write(&self.static_config_path, TRAEFIK_STATIC_CONFIG)?;
+        fs::write(&self.static_config_path, traefik_static_config(self.acme.as_ref()))?;
         info!(
             "Created Traefik static config at {}",
             self.static_config_path
@@ -166,22 +193,51 @@ impl Traefik {
                 network_mode: Some(XNET_NETWORK_NAME.to_string()),
                 port_bindings: Some(port_bindings),
                 extra_hosts: Some(vec!["host.docker.internal:host-gateway".to_string()]),
-                mounts: Some(vec![
-                    Mount {
-                        target: Some("/etc/traefik/traefik.yml".to_string()),
-                        source: Some(self.static_config_path.clone()),
-                        typ: Some(MountTypeEnum::BIND),
-                        read_only: Some(true),
-                        ..Default::default()
-                    },
-                    Mount {
-                        target: Some("/etc/traefik/dynamic.yml".to_string()),
-                        source: Some(self.dynamic_config_path.clone()),
-                        typ: Some(MountTypeEnum::BIND),
-                        read_only: Some(false),
-                        ..Default::default()
-                    },
-                ]),
+                mounts: Some({
+                    let mut mounts = vec![
+                        Mount {
+                            target: Some("/etc/traefik/traefik.yml".to_string()),
+                            source: Some(self.static_config_path.clone()),
+                            typ: Some(MountTypeEnum::BIND),
+                            read_only: Some(true),
+                            ..Default::default()
+                        },
+                        Mount {
+                            target: Some("/etc/traefik/dynamic.yml".to_string()),
+                            source: Some(self.dynamic_config_path.clone()),
+                            typ: Some(MountTypeEnum::BIND),
+                            read_only: Some(false),
+                            ..Default::default()
+                        },
+                    ];
+                    if let Some(acme) = &self.acme {
+                        // Ensure the ACME storage file exists with restricted permissions.
+                        // Traefik requires 600 on acme.json or it refuses to start.
+                        let acme_path = std::path::Path::new(&acme.storage);
+                        if let Some(parent) = acme_path.parent() {
+                            fs::create_dir_all(parent)?;
+                        }
+                        if !acme_path.exists() {
+                            fs::write(&acme.storage, "{}")?;
+                        }
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            fs::set_permissions(
+                                &acme.storage,
+                                fs::Permissions::from_mode(0o600),
+                            )?;
+                        }
+                        mounts.push(Mount {
+                            target: Some(acme.storage.clone()),
+                            source: Some(acme.storage.clone()),
+                            typ: Some(MountTypeEnum::BIND),
+                            read_only: Some(false),
+                            ..Default::default()
+                        });
+                    }
+                    mounts
+                }),
                 ..Default::default()
             }),
             networking_config: Some(NetworkingConfig { endpoints_config }.into()),
