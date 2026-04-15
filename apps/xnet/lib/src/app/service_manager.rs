@@ -70,6 +70,7 @@ impl ServiceManager {
         let mut traefik = Traefik::builder()
             .maybe_http_port(config.traefik_port)
             .maybe_https_port(config.traefik_https_port)
+            .maybe_acme(config.traefik_acme.clone())
             .build();
         traefik.start(&proxy).await?;
 
