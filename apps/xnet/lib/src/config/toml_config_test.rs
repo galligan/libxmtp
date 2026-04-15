@@ -217,3 +217,60 @@ url = "http://127.0.0.1:9999"
     assert_eq!(config.extra_traefik_routes[1].name, "another-service");
     assert_eq!(config.extra_traefik_routes[1].priority, None);
 }
+
+#[test]
+fn acme_config_defaults_to_none() {
+    let toml_str = "[xnet]\n";
+    let config: TomlConfig = toml::from_str(toml_str).unwrap();
+    assert!(config.traefik.acme.is_none());
+}
+
+#[test]
+fn acme_config_parses_email() {
+    let toml_str = r#"
+[traefik.acme]
+email = "ops@xmtp.com"
+"#;
+    let config: TomlConfig = toml::from_str(toml_str).unwrap();
+    let acme = config.traefik.acme.unwrap();
+    assert_eq!(acme.email, "ops@xmtp.com");
+    assert_eq!(acme.storage, "/tmp/xnet/traefik/acme.json");
+}
+
+#[test]
+fn acme_config_parses_custom_storage() {
+    let toml_str = r#"
+[traefik.acme]
+email = "ops@xmtp.com"
+storage = "/data/acme.json"
+"#;
+    let config: TomlConfig = toml::from_str(toml_str).unwrap();
+    let acme = config.traefik.acme.unwrap();
+    assert_eq!(acme.storage, "/data/acme.json");
+}
+
+#[test]
+fn extra_route_tls_defaults_to_false() {
+    let toml_str = r#"
+[[extra_traefik_routes]]
+name = "grafana"
+rule = "Host(`grafana.xmtp.run`)"
+url = "http://xnet-grafana:3000"
+"#;
+    let config: TomlConfig = toml::from_str(toml_str).unwrap();
+    assert!(!config.extra_traefik_routes[0].tls);
+}
+
+#[test]
+fn extra_route_tls_parses_true() {
+    let toml_str = r#"
+[[extra_traefik_routes]]
+name = "status-page"
+rule = "Host(`migrate.xmtp.run`)"
+url = "http://xnet-status:8899"
+priority = 100
+tls = true
+"#;
+    let config: TomlConfig = toml::from_str(toml_str).unwrap();
+    assert!(config.extra_traefik_routes[0].tls);
+}

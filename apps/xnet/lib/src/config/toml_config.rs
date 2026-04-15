@@ -69,6 +69,18 @@ pub struct TraefikToml {
     pub image: ImageConfig,
     pub port: Option<u16>,
     pub https_port: Option<u16>,
+    pub acme: Option<AcmeConfig>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct AcmeConfig {
+    pub email: String,
+    #[serde(default = "default_acme_storage")]
+    pub storage: String,
+}
+
+fn default_acme_storage() -> String {
+    "/tmp/xnet/traefik/acme.json".to_string()
 }
 
 #[derive(Deserialize, Default, Debug, Clone)]
@@ -119,4 +131,6 @@ pub struct ExtraTraefikRoute {
     pub rule: String,
     pub url: String,
     pub priority: Option<i32>,
+    #[serde(default)]
+    pub tls: bool,
 }
