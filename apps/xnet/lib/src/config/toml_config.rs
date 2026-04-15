@@ -75,6 +75,8 @@ pub struct TraefikToml {
 #[derive(Deserialize, Debug, Clone)]
 pub struct AcmeConfig {
     pub email: String,
+    /// Path used as both the host-side bind mount source and the container-internal
+    /// Traefik ACME storage target. Must be a valid path on both systems.
     #[serde(default = "default_acme_storage")]
     pub storage: String,
 }

@@ -239,6 +239,17 @@ impl Config {
             // Validate node configuration
             validate_node_toml(&c.xmtpd_nodes)?;
 
+            // Validate ACME config values don't contain YAML-breaking characters
+            if let Some(ref acme) = c.traefik_acme {
+                for (field, value) in [("email", &acme.email), ("storage", &acme.storage)] {
+                    if value.contains('"') || value.contains('\n') || value.contains('\r') {
+                        color_eyre::eyre::bail!(
+                            "[traefik.acme] {field} contains invalid characters (quotes or newlines)"
+                        );
+                    }
+                }
+            }
+
             // Warn and strip tls flags if ACME is not configured
             if c.traefik_acme.is_none() {
                 for route in &mut c.extra_traefik_routes {
