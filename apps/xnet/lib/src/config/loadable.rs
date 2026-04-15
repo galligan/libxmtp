@@ -13,7 +13,9 @@ use crate::config::AppArgs;
 use crate::constants::{ToxiProxy as ToxiProxyConst, Xmtpd as XmtpdConst};
 
 use super::AddressMode;
-use super::toml_config::{AcmeConfig, ExtraTraefikRoute, ImageConfig, MigrationConfig, NodeToml, TomlConfig};
+use super::toml_config::{
+    AcmeConfig, ExtraTraefikRoute, ImageConfig, MigrationConfig, NodeToml, TomlConfig,
+};
 
 static CONF: OnceLock<Config> = OnceLock::new();
 
@@ -156,7 +158,16 @@ impl Config {
             // Resolve address mode: env > CLI > TOML, with mutual exclusion validation
             let effective_remote_ip = std::env::var("XNET_REMOTE_IP")
                 .ok()
-                .and_then(|s| s.parse::<std::net::IpAddr>().ok())
+                .and_then(|s| match s.parse::<std::net::IpAddr>() {
+                    Ok(ip) => Some(ip),
+                    Err(_) => {
+                        tracing::warn!(
+                            "XNET_REMOTE_IP is not a valid IP: '{}', ignoring",
+                            s
+                        );
+                        None
+                    }
+                })
                 .or(app.args.remote)
                 .or(toml.xnet.remote_ip);
 

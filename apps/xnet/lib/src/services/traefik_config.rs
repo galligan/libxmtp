@@ -582,26 +582,47 @@ mod tests {
         let parsed: TraefikDynamicConfig = serde_yaml::from_str(&contents).unwrap();
 
         // HTTPS router with certResolver
-        let router = parsed.http.routers.get("status-page").expect("HTTPS router missing");
+        let router = parsed
+            .http
+            .routers
+            .get("status-page")
+            .expect("HTTPS router missing");
         assert_eq!(router.entry_points, Some(vec!["https".to_string()]));
         let tls = router.tls.as_ref().expect("tls config missing");
         assert_eq!(tls.cert_resolver, Some("letsencrypt".to_string()));
 
         // HTTP→HTTPS redirect router
-        let redirect = parsed.http.routers.get("status-page-redirect").expect("redirect router missing");
+        let redirect = parsed
+            .http
+            .routers
+            .get("status-page-redirect")
+            .expect("redirect router missing");
         assert_eq!(redirect.entry_points, Some(vec!["http".to_string()]));
-        assert_eq!(redirect.middlewares, Some(vec!["redirect-https".to_string()]));
+        assert_eq!(
+            redirect.middlewares,
+            Some(vec!["redirect-https".to_string()])
+        );
         assert!(redirect.tls.is_none());
 
         // Redirect middleware
-        let mw = parsed.http.middlewares.as_ref().expect("middlewares missing");
-        let rs = mw.get("redirect-https").expect("redirect-https middleware missing");
+        let mw = parsed
+            .http
+            .middlewares
+            .as_ref()
+            .expect("middlewares missing");
+        let rs = mw
+            .get("redirect-https")
+            .expect("redirect-https middleware missing");
         let scheme = rs.redirect_scheme.as_ref().expect("redirectScheme missing");
         assert_eq!(scheme.scheme, "https");
         assert!(scheme.permanent);
 
         // Service exists
-        let svc = parsed.http.services.get("status-page").expect("service missing");
+        let svc = parsed
+            .http
+            .services
+            .get("status-page")
+            .expect("service missing");
         assert_eq!(svc.load_balancer.servers[0].url, "http://xnet-status:8899");
     }
 

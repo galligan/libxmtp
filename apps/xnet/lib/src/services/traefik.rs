@@ -22,7 +22,7 @@ use url::Url;
 use crate::{
     Config,
     config::NodeToml,
-    config::toml_config::AcmeConfig,
+    config::AcmeConfig,
     constants::{MAX_XMTPD_NODES, Traefik as TraefikConst, Xmtpd as XmtpdConst},
     network::XNET_NETWORK_NAME,
     services::{ManagedContainer, Service, ToxiProxy, TraefikConfig, expose, expose_127},
@@ -107,7 +107,6 @@ pub struct Traefik {
     dynamic_config_path: String,
 
     /// ACME/TLS configuration (None = no cert management)
-    #[builder(default)]
     acme: Option<AcmeConfig>,
 
     /// The host port for HTTP traffic (default: 80)
@@ -139,7 +138,10 @@ impl Traefik {
         fs::create_dir_all(config_dir)?;
 
         // Write static config
-        fs::write(&self.static_config_path, traefik_static_config(self.acme.as_ref()))?;
+        fs::write(
+            &self.static_config_path,
+            traefik_static_config(self.acme.as_ref()),
+        )?;
         info!(
             "Created Traefik static config at {}",
             self.static_config_path
@@ -223,10 +225,7 @@ impl Traefik {
                         #[cfg(unix)]
                         {
                             use std::os::unix::fs::PermissionsExt;
-                            fs::set_permissions(
-                                &acme.storage,
-                                fs::Permissions::from_mode(0o600),
-                            )?;
+                            fs::set_permissions(&acme.storage, fs::Permissions::from_mode(0o600))?;
                         }
                         mounts.push(Mount {
                             target: Some(acme.storage.clone()),
