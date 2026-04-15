@@ -216,6 +216,15 @@ impl MessageBackendBuilder {
         self.from_bundle(bundle)
     }
 
+    /// Builds a d14n client that reads from a single node directly (no MultiNodeClient).
+    /// Writes still route to the gateway.
+    /// Errors if V3 Host or Gateway Host is missing.
+    pub fn build_d14n_single(&mut self) -> Result<XmtpApiClient, MessageBackendBuilderError> {
+        let Self { client_bundle, .. } = self;
+        let bundle = client_bundle.build_d14n_single()?;
+        self.from_bundle(bundle)
+    }
+
     /// If a gateway host is present, builds d14n-only
     /// otherwise builds a v3 client
     /// Errors if V3 Host is missing
