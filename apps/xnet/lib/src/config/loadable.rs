@@ -13,7 +13,7 @@ use crate::config::AppArgs;
 use crate::constants::{ToxiProxy as ToxiProxyConst, Xmtpd as XmtpdConst};
 
 use super::AddressMode;
-use super::toml_config::{ExtraTraefikRoute, ImageConfig, MigrationConfig, NodeToml, TomlConfig};
+use super::toml_config::{AcmeConfig, ExtraTraefikRoute, ImageConfig, MigrationConfig, NodeToml, TomlConfig};
 
 static CONF: OnceLock<Config> = OnceLock::new();
 
@@ -90,6 +90,8 @@ pub struct Config {
     pub traefik_port: Option<u16>,
     /// Traefik HTTPS host port override
     pub traefik_https_port: Option<u16>,
+    /// Traefik ACME/TLS configuration (None = disabled)
+    pub traefik_acme: Option<AcmeConfig>,
     /// Gateway image overrides
     #[builder(default)]
     pub gateway: ImageConfig,
@@ -204,6 +206,7 @@ impl Config {
                 .traefik(toml.traefik.image)
                 .maybe_traefik_port(toml.traefik.port)
                 .maybe_traefik_https_port(toml.traefik.https_port)
+                .maybe_traefik_acme(toml.traefik.acme.clone())
                 .enable_v3(toml.xnet.enable_v3)
                 .enable_d14n(toml.xnet.enable_d14n)
                 .enable_monitoring(toml.xnet.enable_monitoring)
@@ -235,6 +238,19 @@ impl Config {
 
             // Validate node configuration
             validate_node_toml(&c.xmtpd_nodes)?;
+
+            // Warn and strip tls flags if ACME is not configured
+            if c.traefik_acme.is_none() {
+                for route in &mut c.extra_traefik_routes {
+                    if route.tls {
+                        tracing::warn!(
+                            "Route '{}' has tls=true but [traefik.acme] is not configured — ignoring TLS",
+                            route.name
+                        );
+                        route.tls = false;
+                    }
+                }
+            }
 
             CONF.set(c)
                 .map_err(|_| eyre!("Config already initialized"))?;
