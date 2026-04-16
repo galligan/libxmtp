@@ -21,8 +21,8 @@ use url::Url;
 
 use crate::{
     Config,
-    config::NodeToml,
     config::AcmeConfig,
+    config::NodeToml,
     constants::{MAX_XMTPD_NODES, Traefik as TraefikConst, Xmtpd as XmtpdConst},
     network::XNET_NETWORK_NAME,
     services::{ManagedContainer, Service, ToxiProxy, TraefikConfig, expose, expose_127},

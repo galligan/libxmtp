@@ -161,10 +161,7 @@ impl Config {
                 .and_then(|s| match s.parse::<std::net::IpAddr>() {
                     Ok(ip) => Some(ip),
                     Err(_) => {
-                        tracing::warn!(
-                            "XNET_REMOTE_IP is not a valid IP: '{}', ignoring",
-                            s
-                        );
+                        tracing::warn!("XNET_REMOTE_IP is not a valid IP: '{}', ignoring", s);
                         None
                     }
                 })

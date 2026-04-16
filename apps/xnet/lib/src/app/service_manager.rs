@@ -61,6 +61,12 @@ impl ServiceManager {
     /// starts services if not already started
     /// if running connects to them.
     pub async fn start() -> Result<Self> {
+        Self::start_paused(false).await
+    }
+
+    /// Like [`start`](Self::start) but also pauses broadcaster contracts when
+    /// `cli_paused` is true (before node provisioning).
+    pub async fn start_paused(cli_paused: bool) -> Result<Self> {
         let config = Config::load()?;
 
         // Phase 1: Infrastructure (always)
@@ -156,7 +162,7 @@ impl ServiceManager {
         };
 
         // Phase 6b: Pause broadcasters if configured (must happen before Phase 7 node provisioning)
-        if config.paused {
+        if config.paused || cli_paused {
             if let Some(ref rpc) = anvil_rpc_url {
                 crate::contracts::set_broadcasters_paused(
                     rpc.as_str(),
