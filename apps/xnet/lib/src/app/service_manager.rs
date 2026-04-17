@@ -86,7 +86,7 @@ impl ServiceManager {
         let mut coredns = CoreDns::builder().traefik_ip(traefik_ip).build();
         coredns.start(&proxy).await?;
 
-        let traefik_config = TraefikConfig::new(traefik.dynamic_config_path())?;
+        let traefik_config = TraefikConfig::new(traefik.dynamic_config_path(), config.use_tls)?;
         if !config.extra_traefik_routes.is_empty() {
             traefik_config.set_extra_routes(config.extra_traefik_routes.clone())?;
         }

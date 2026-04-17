@@ -455,7 +455,13 @@ mod tests {
 
     fn temp_config() -> (TraefikConfig, NamedTempFile) {
         let file = NamedTempFile::new().unwrap();
-        let config = TraefikConfig::new(file.path()).unwrap();
+        let config = TraefikConfig::new(file.path(), false).unwrap();
+        (config, file)
+    }
+
+    fn temp_config_tls() -> (TraefikConfig, NamedTempFile) {
+        let file = NamedTempFile::new().unwrap();
+        let config = TraefikConfig::new(file.path(), true).unwrap();
         (config, file)
     }
 
@@ -593,7 +599,7 @@ mod tests {
 
         // Re-load from file — extra routes should NOT be recovered
         // (they are memory-only, sourced from TOML config)
-        let config2 = TraefikConfig::new(file.path()).unwrap();
+        let config2 = TraefikConfig::new(file.path(), false).unwrap();
         assert!(config2.routes().is_empty());
 
         // Extra routes Vec should be empty on fresh load
