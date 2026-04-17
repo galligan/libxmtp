@@ -46,6 +46,9 @@ pub struct XnetToml {
     pub enable_d14n: bool,
     /// Enable monitoring services (Prometheus, Grafana, PgAdmin, Otterscan)
     pub enable_monitoring: bool,
+    /// Enable TLS mode. Gateway returns https:// URLs and Traefik routes
+    /// use the HTTPS entrypoint. Requires TLS cert files to be present.
+    pub use_tls: bool,
 }
 
 impl Default for XnetToml {
@@ -58,6 +61,7 @@ impl Default for XnetToml {
             enable_v3: true,
             enable_d14n: true,
             enable_monitoring: true,
+            use_tls: false,
         }
     }
 }

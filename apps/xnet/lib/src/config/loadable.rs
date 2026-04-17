@@ -94,6 +94,9 @@ pub struct Config {
     pub traefik_https_port: Option<u16>,
     /// Traefik ACME/TLS configuration (None = disabled)
     pub traefik_acme: Option<AcmeConfig>,
+    /// File-based TLS mode (wildcard cert, no ACME)
+    #[builder(default)]
+    pub use_tls: bool,
     /// Gateway image overrides
     #[builder(default)]
     pub gateway: ImageConfig,
@@ -215,6 +218,7 @@ impl Config {
                 .maybe_traefik_port(toml.traefik.port)
                 .maybe_traefik_https_port(toml.traefik.https_port)
                 .maybe_traefik_acme(toml.traefik.acme.clone())
+                .use_tls(toml.xnet.use_tls)
                 .enable_v3(toml.xnet.enable_v3)
                 .enable_d14n(toml.xnet.enable_d14n)
                 .enable_monitoring(toml.xnet.enable_monitoring)
@@ -258,12 +262,20 @@ impl Config {
                 }
             }
 
-            // Warn and strip tls flags if ACME is not configured
-            if c.traefik_acme.is_none() {
+            if c.use_tls && c.traefik_acme.is_some() {
+                color_eyre::eyre::bail!(
+                    "use_tls and [traefik.acme] are mutually exclusive — \
+                     use_tls uses file-based certs, acme uses Let's Encrypt"
+                );
+            }
+
+            // Warn and strip tls flags if neither TLS mode is configured
+            let has_tls = c.use_tls || c.traefik_acme.is_some();
+            if !has_tls {
                 for route in &mut c.extra_traefik_routes {
                     if route.tls {
                         tracing::warn!(
-                            "Route '{}' has tls=true but [traefik.acme] is not configured — ignoring TLS",
+                            "Route '{}' has tls=true but neither use_tls nor [traefik.acme] is configured — ignoring TLS",
                             route.name
                         );
                         route.tls = false;
