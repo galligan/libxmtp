@@ -259,7 +259,9 @@ impl TraefikConfig {
                         rule: format!("Host(`{}`)", hostname),
                         service: name.clone(),
                         priority: None,
-                        tls: Some(TlsConfig { cert_resolver: None }),
+                        tls: Some(TlsConfig {
+                            cert_resolver: None,
+                        }),
                         entry_points: Some(vec!["https".to_string()]),
                         middlewares: None,
                     },
@@ -312,7 +314,9 @@ impl TraefikConfig {
                 any_tls = true;
 
                 let tls_config = if self.use_tls {
-                    TlsConfig { cert_resolver: None }
+                    TlsConfig {
+                        cert_resolver: None,
+                    }
                 } else {
                     TlsConfig {
                         cert_resolver: Some("letsencrypt".to_string()),
@@ -782,10 +786,12 @@ mod tests {
         assert!(router.tls.is_none());
         assert!(router.entry_points.is_none());
         assert!(router.middlewares.is_none());
-        assert!(!parsed
-            .http
-            .routers
-            .contains_key("node100_xmtpd_local_redirect"));
+        assert!(
+            !parsed
+                .http
+                .routers
+                .contains_key("node100_xmtpd_local_redirect")
+        );
     }
 
     #[test]
