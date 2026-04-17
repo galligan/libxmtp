@@ -23,6 +23,8 @@ use crate::config::ExtraTraefikRoute;
 pub struct TraefikConfig {
     /// Path to the dynamic configuration file
     config_path: PathBuf,
+    /// File-based TLS mode — all routes get HTTPS entrypoint
+    use_tls: bool,
     /// Hostname -> ToxiProxy port mapping (thread-safe)
     routes: Arc<Mutex<HashMap<String, u16>>>,
     /// User-defined extra routes (from TOML config, stored in memory only)
@@ -155,7 +157,7 @@ impl TraefikConfig {
     /// The config file will be written to the specified path.
     /// Creates parent directories if they don't exist.
     /// Loads existing routes from the file if it exists.
-    pub fn new(config_path: impl Into<PathBuf>) -> Result<Self> {
+    pub fn new(config_path: impl Into<PathBuf>, use_tls: bool) -> Result<Self> {
         let config_path = config_path.into();
 
         // Create parent directory if it doesn't exist
@@ -173,6 +175,7 @@ impl TraefikConfig {
 
         Ok(Self {
             config_path,
+            use_tls,
             routes: Arc::new(Mutex::new(routes)),
             extra_routes: Arc::new(Mutex::new(Vec::new())),
         })
@@ -242,22 +245,51 @@ impl TraefikConfig {
 
         let mut routers = HashMap::new();
         let mut services = HashMap::new();
+        let mut middlewares = HashMap::new();
+        let mut any_tls = false;
 
         for (hostname, toxi_port) in routes.iter() {
-            // Generate a safe router/service name from hostname
             let name = hostname.replace(['.', '-'], "_");
 
-            routers.insert(
-                name.clone(),
-                Router {
-                    rule: format!("Host(`{}`)", hostname),
-                    service: name.clone(),
-                    priority: None,
-                    tls: None,
-                    entry_points: None,
-                    middlewares: None,
-                },
-            );
+            if self.use_tls {
+                // HTTPS router (primary)
+                routers.insert(
+                    name.clone(),
+                    Router {
+                        rule: format!("Host(`{}`)", hostname),
+                        service: name.clone(),
+                        priority: None,
+                        tls: Some(TlsConfig { cert_resolver: None }),
+                        entry_points: Some(vec!["https".to_string()]),
+                        middlewares: None,
+                    },
+                );
+                // HTTP → HTTPS redirect router
+                routers.insert(
+                    format!("{}_redirect", name),
+                    Router {
+                        rule: format!("Host(`{}`)", hostname),
+                        service: name.clone(),
+                        priority: None,
+                        tls: None,
+                        entry_points: Some(vec!["http".to_string()]),
+                        middlewares: Some(vec!["redirect-https".to_string()]),
+                    },
+                );
+                any_tls = true;
+            } else {
+                routers.insert(
+                    name.clone(),
+                    Router {
+                        rule: format!("Host(`{}`)", hostname),
+                        service: name.clone(),
+                        priority: None,
+                        tls: None,
+                        entry_points: None,
+                        middlewares: None,
+                    },
+                );
+            }
 
             services.insert(
                 name,
@@ -274,12 +306,18 @@ impl TraefikConfig {
         }
 
         // Extra routes (user-defined, may use any URL/rule)
-        let mut middlewares = HashMap::new();
-        let mut any_tls = false;
 
         for route in extra.iter() {
             if route.tls {
                 any_tls = true;
+
+                let tls_config = if self.use_tls {
+                    TlsConfig { cert_resolver: None }
+                } else {
+                    TlsConfig {
+                        cert_resolver: Some("letsencrypt".to_string()),
+                    }
+                };
 
                 // HTTPS router with cert resolver
                 routers.insert(
@@ -288,9 +326,7 @@ impl TraefikConfig {
                         rule: route.rule.clone(),
                         service: route.name.clone(),
                         priority: route.priority,
-                        tls: Some(TlsConfig {
-                            cert_resolver: Some("letsencrypt".to_string()),
-                        }),
+                        tls: Some(tls_config),
                         entry_points: Some(vec!["https".to_string()]),
                         middlewares: None,
                     },
