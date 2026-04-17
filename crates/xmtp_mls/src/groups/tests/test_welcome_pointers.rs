@@ -610,8 +610,8 @@ async fn test_welcome_pointer_task_retry_resolution() {
             message_cursor: 0,
             added_by_inbox_is_pending_remove: false,
         }
-            .encode_to_vec()
-            .as_slice(),
+        .encode_to_vec()
+        .as_slice(),
         WelcomePointersExtension::preferred_type(),
         &welcome_pointer_v1.encryption_key,
         &welcome_pointer_v1.welcome_metadata_nonce,

@@ -118,7 +118,10 @@ impl XmtpTestClient for ToxicNodeGoClient {
     type Builder = ClientBuilder;
 
     fn create() -> Self::Builder {
-        build_client(GrpcUrlsToxic::NODE)
+        xmtp_common::wasm_or_native! {
+            wasm => { build_client(GrpcUrlsToxic::NODE_WEB) },
+            native => { build_client(GrpcUrlsToxic::NODE) },
+        }
     }
 }
 
@@ -142,7 +145,10 @@ impl ToxicTestClient for ToxicXmtpdClient {
 #[xmtp_common::async_trait]
 impl ToxicTestClient for ToxicNodeGoClient {
     async fn proxies() -> ToxicProxies {
-        ToxicProxies::new([TOXIPROXY.find_proxy("node-go").await.unwrap()])
+        xmtp_common::wasm_or_native! {
+            wasm => { ToxicProxies::new([TOXIPROXY.find_proxy("grpc-web").await.unwrap()]) },
+            native => { ToxicProxies::new([TOXIPROXY.find_proxy("node-go").await.unwrap()]) },
+        }
     }
 }
 

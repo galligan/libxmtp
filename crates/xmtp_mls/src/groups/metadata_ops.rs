@@ -401,14 +401,11 @@ where
         let db = self.context.db();
         let mut changed_records = self.quietly_update_consent_state(state, &db)?;
 
-        if let Some(dm_id) = db
-            .find_group(&self.group_id)?
-            .and_then(|group| {
-                (group.conversation_type == ConversationType::Dm)
-                    .then_some(group.dm_id)
-                    .flatten()
-            })
-        {
+        if let Some(dm_id) = db.find_group(&self.group_id)?.and_then(|group| {
+            (group.conversation_type == ConversationType::Dm)
+                .then_some(group.dm_id)
+                .flatten()
+        }) {
             let inbox_consent = StoredConsentRecord::new(
                 xmtp_db::consent_record::ConsentType::InboxId,
                 state,

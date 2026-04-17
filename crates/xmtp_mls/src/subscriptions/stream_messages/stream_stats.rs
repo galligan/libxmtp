@@ -3,7 +3,8 @@ use crate::{
     context::XmtpSharedContext,
     groups::MlsGroup,
     subscriptions::{
-        Result, StreamAllMessages,
+        Result,
+        stream_all::StreamAllMessages,
         stream_conversations::{StreamConversations, WelcomesApiSubscription},
     },
 };

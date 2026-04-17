@@ -196,12 +196,11 @@ where
                         )?
                         .map(|record| record.state);
 
-                    inbox_state.or(
-                        db.find_consent_by_dm_id(dm_id)?
-                            .into_iter()
-                            .next()
-                            .map(|record| record.state),
-                    )
+                    inbox_state.or(db
+                        .find_consent_by_dm_id(dm_id)?
+                        .into_iter()
+                        .next()
+                        .map(|record| record.state))
                 }
                 None => None,
             };

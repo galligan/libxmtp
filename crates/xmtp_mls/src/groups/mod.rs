@@ -54,6 +54,7 @@ pub use xmtp_db::user_preferences::HmacKey;
 pub use xmtp_mls_common::group::{DMMetadataOptions, GroupMetadataOptions};
 pub use xmtp_proto::types::Cursor;
 
+#[cfg(test)]
 pub(crate) use self::group_permissions::PolicySet;
 pub use self::group_permissions::PreconfiguredPolicies;
 use crate::{GroupCommitLock, context::XmtpSharedContext};

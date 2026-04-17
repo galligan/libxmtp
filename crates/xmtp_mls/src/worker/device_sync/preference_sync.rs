@@ -57,7 +57,9 @@ where
                     let peer_inbox_update = group_id
                         .as_deref()
                         .and_then(|group_id| db.find_group(group_id).ok().flatten())
-                        .filter(|group| group.conversation_type == xmtp_db::group::ConversationType::Dm)
+                        .filter(|group| {
+                            group.conversation_type == xmtp_db::group::ConversationType::Dm
+                        })
                         .and_then(|group| group.dm_id)
                         .map(|dm_id| dm_id.other_inbox_id(&inbox_id))
                         .filter(|peer_inbox_id| peer_inbox_id != &inbox_id)

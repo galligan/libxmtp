@@ -36,8 +36,8 @@ use xmtp_db::{
 use xmtp_mls_common::{
     group_metadata::extract_group_metadata, group_mutable_metadata::extract_group_mutable_metadata,
 };
-use xmtp_proto::types::InstallationId;
 use xmtp_proto::types::Cursor;
+use xmtp_proto::types::InstallationId;
 use xmtp_proto::xmtp::mls::message_contents::{ContentTypeId, GroupUpdated, group_updated::Inbox};
 
 /// Create a group from a decrypted and decoded welcome message.

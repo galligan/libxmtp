@@ -18,12 +18,11 @@ pub mod process_welcome;
 mod stream_all;
 mod stream_conversations;
 pub mod stream_messages;
-pub(crate) use stream_all::StreamAllMessages;
 
 use crate::groups::{GroupError, mls_sync::GroupMessageProcessingError};
-pub(crate) use events::{
-    LocalEventError, LocalEvents, StreamMessages, SyncWorkerEvent, preference_updates_event,
-};
+#[cfg(test)]
+pub(crate) use events::StreamMessages;
+pub(crate) use events::{LocalEventError, LocalEvents, SyncWorkerEvent, preference_updates_event};
 use xmtp_common::{ErrorCode, RetryableError, retryable};
 use xmtp_db::{NotFound, StorageError};
 

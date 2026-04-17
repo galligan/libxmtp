@@ -2,7 +2,6 @@ use super::membership::{
     calculate_membership_changes_with_keypackages, get_keypackages_for_installation_ids,
 };
 use super::*;
-use crate::identity_updates::IdentityStateContext;
 use crate::groups::{
     GroupError, build_group_membership_extension,
     intents::{PostCommitAction, UpdateGroupMembershipIntentData},
@@ -10,6 +9,7 @@ use crate::groups::{
     update_required_capabilities_for_proposals,
     validated_commit::extract_group_membership,
 };
+use crate::identity_updates::IdentityStateContext;
 use openmls::{
     extensions::Extensions,
     group::GroupContext,
@@ -150,14 +150,14 @@ where
             context.mls_storage_ref(),
             openmls_group,
             |group, provider| {
-            group.update_group_membership(
-                provider,
-                &signer,
-                &key_packages_to_add,
-                &leaf_nodes_to_remove,
-                new_extensions,
-            )
-        },
+                group.update_group_membership(
+                    provider,
+                    &signer,
+                    &key_packages_to_add,
+                    &leaf_nodes_to_remove,
+                    new_extensions,
+                )
+            },
         )?;
 
     let staged_commit = staged_commit.ok_or_else(|| GroupError::MissingPendingCommit)?;
@@ -204,11 +204,10 @@ where
     let extensions_changed = current_membership != new_membership_check;
     let new_extensions_for_filter = new_extensions.clone();
 
-    let ((proposal_payloads, bundle), staged_commit, group_epoch) =
-        generate_commit_with_rollback(
-            context.mls_storage_ref(),
-            openmls_group,
-            |group, provider| {
+    let ((proposal_payloads, bundle), staged_commit, group_epoch) = generate_commit_with_rollback(
+        context.mls_storage_ref(),
+        openmls_group,
+        |group, provider| {
             let mut proposal_payloads: Vec<Vec<u8>> = Vec::new();
 
             // 1. Create Add proposals
@@ -262,7 +261,7 @@ where
 
             Ok::<_, GroupError>((proposal_payloads, bundle))
         },
-        )?;
+    )?;
 
     let staged_commit = staged_commit.ok_or_else(|| GroupError::MissingPendingCommit)?;
     let (commit, maybe_welcome_message, _) = bundle.into_messages();

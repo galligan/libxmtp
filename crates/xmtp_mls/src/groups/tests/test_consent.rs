@@ -1,8 +1,8 @@
+use crate::groups::send_message_opts::SendMessageOpts;
 use diesel::{ExpressionMethods, QueryDsl, RunQueryDsl};
+use xmtp_db::consent_record::{ConsentState, ConsentType};
 use xmtp_db::prelude::QueryConsentRecord;
 use xmtp_db::schema::consent_records::dsl as consent_dsl;
-use crate::groups::send_message_opts::SendMessageOpts;
-use xmtp_db::consent_record::{ConsentState, ConsentType};
 
 use crate::context::XmtpSharedContext;
 use crate::tester;

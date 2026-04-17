@@ -3433,10 +3433,8 @@ async fn process_messages_abort_on_retryable_error() {
         .unwrap()
         .group_messages()
         .unwrap();
-    let blocked_message = bo_messages
-        .last()
-        .expect("expected messages to process");
-    let blocked_cursor = blocked_message.cursor.clone();
+    let blocked_message = bo_messages.last().expect("expected messages to process");
+    let blocked_cursor = blocked_message.cursor;
     let blocked_originator = blocked_message.originator_id();
     let blocked_entity_kind = if blocked_message.is_commit() {
         EntityKind::CommitMessage
@@ -3446,11 +3444,7 @@ async fn process_messages_abort_on_retryable_error() {
     let cursor_before = bo
         .context
         .db()
-        .get_last_cursor_for_originator(
-            &bo_group.group_id,
-            blocked_entity_kind,
-            blocked_originator,
-        )
+        .get_last_cursor_for_originator(&bo_group.group_id, blocked_entity_kind, blocked_originator)
         .unwrap();
 
     let db = bo.context.store().db();
@@ -3471,11 +3465,7 @@ async fn process_messages_abort_on_retryable_error() {
     let cursor_after_failure = bo
         .context
         .db()
-        .get_last_cursor_for_originator(
-            &bo_group.group_id,
-            blocked_entity_kind,
-            blocked_originator,
-        )
+        .get_last_cursor_for_originator(&bo_group.group_id, blocked_entity_kind, blocked_originator)
         .unwrap();
     assert_eq!(
         cursor_before, cursor_after_failure,
@@ -3497,11 +3487,7 @@ async fn process_messages_abort_on_retryable_error() {
     let cursor_after_replay = bo
         .context
         .db()
-        .get_last_cursor_for_originator(
-            &bo_group.group_id,
-            blocked_entity_kind,
-            blocked_originator,
-        )
+        .get_last_cursor_for_originator(&bo_group.group_id, blocked_entity_kind, blocked_originator)
         .unwrap();
     assert_eq!(cursor_after_replay, blocked_cursor);
 }
@@ -3637,7 +3623,10 @@ async fn skip_already_processed_intents() {
             None,
         )
         .unwrap();
-    assert_eq!(processed_intents_after.len(), processed_intents_before.len());
+    assert_eq!(
+        processed_intents_after.len(),
+        processed_intents_before.len()
+    );
     let send_intent_after = processed_intents_after
         .iter()
         .find(|intent| intent.id == send_intent.id)
@@ -3656,7 +3645,10 @@ async fn skip_already_processed_intents() {
     );
     assert_eq!(send_intent_after.state, IntentState::Processed);
     assert_eq!(
-        (send_intent_after.sequence_id, send_intent_after.originator_id),
+        (
+            send_intent_after.sequence_id,
+            send_intent_after.originator_id
+        ),
         send_intent_cursor
     );
 
@@ -3768,7 +3760,10 @@ async fn self_leave_request_resolution_is_idempotent() {
         .unwrap();
     assert_eq!(pending_remove_before_replay.len(), 1);
     assert!(pending_remove_before_replay.contains(&bola.inbox_id().to_string()));
-    assert_eq!(bola_group.membership_state().unwrap(), GroupMembershipState::PendingRemove);
+    assert_eq!(
+        bola_group.membership_state().unwrap(),
+        GroupMembershipState::PendingRemove
+    );
 
     let process_result = bola_group.sync_until_intent_resolved(leave_intent.id).await;
     assert_ok!(process_result);
@@ -3834,7 +3829,10 @@ async fn self_leave_request_resolution_is_idempotent() {
         .get_pending_remove_users(&bola_group.group_id)
         .unwrap();
     assert_eq!(pending_remove_after_replay, pending_remove_before_replay);
-    assert_eq!(bola_group.membership_state().unwrap(), GroupMembershipState::PendingRemove);
+    assert_eq!(
+        bola_group.membership_state().unwrap(),
+        GroupMembershipState::PendingRemove
+    );
 }
 
 #[xmtp_common::test]
@@ -3862,11 +3860,12 @@ async fn external_leave_request_sync_is_idempotent() {
     };
 
     let transcript_ids_before = transcript_ids(&amal_group);
-    assert!(amal
-        .db()
-        .get_pending_remove_users(&amal_group.group_id)
-        .unwrap()
-        .is_empty());
+    assert!(
+        amal.db()
+            .get_pending_remove_users(&amal_group.group_id)
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         amal_group.membership_state().unwrap(),
         GroupMembershipState::Allowed
@@ -3955,10 +3954,14 @@ async fn external_group_update_sync_is_idempotent() {
         .iter()
         .map(|message| message.id.clone())
         .collect::<Vec<_>>();
-    // Permission-only mirrored commits update recipient state, but do not currently
-    // produce a transcript-visible GroupUpdated payload because the validated commit is
-    // considered empty for transcript purposes.
-    assert_eq!(update_ids_after_first_sync, update_ids_before);
+    assert_eq!(
+        update_ids_after_first_sync.len(),
+        update_ids_before.len() + 1
+    );
+    assert_eq!(
+        &update_ids_after_first_sync[..update_ids_before.len()],
+        update_ids_before.as_slice()
+    );
 
     bo_group.sync().await.unwrap();
     assert_eq!(bo_group.group_name().unwrap(), "metadata replay check");
@@ -4072,7 +4075,10 @@ async fn external_membership_removal_sync_is_idempotent() {
         .map(|message| message.id.clone())
         .collect::<Vec<_>>();
 
-    alix_group.remove_members(&[charlie.inbox_id()]).await.unwrap();
+    alix_group
+        .remove_members(&[charlie.inbox_id()])
+        .await
+        .unwrap();
 
     bo_group.sync().await.unwrap();
     let members_after_first_sync = bo_group.members().await.unwrap();
@@ -4144,7 +4150,10 @@ async fn external_admin_list_sync_is_idempotent() {
         .unwrap();
 
     bo_group.sync().await.unwrap();
-    assert_eq!(bo_group.admin_list().unwrap(), vec![bo.inbox_id().to_string()]);
+    assert_eq!(
+        bo_group.admin_list().unwrap(),
+        vec![bo.inbox_id().to_string()]
+    );
 
     let updates_after_first_sync = group_updates();
     let update_ids_after_first_sync = updates_after_first_sync
@@ -4155,7 +4164,10 @@ async fn external_admin_list_sync_is_idempotent() {
     assert_ne!(update_ids_after_first_sync, update_ids_before);
 
     bo_group.sync().await.unwrap();
-    assert_eq!(bo_group.admin_list().unwrap(), vec![bo.inbox_id().to_string()]);
+    assert_eq!(
+        bo_group.admin_list().unwrap(),
+        vec![bo.inbox_id().to_string()]
+    );
 
     let updates_after_second_sync = group_updates();
     assert_eq!(
@@ -4412,7 +4424,10 @@ async fn skip_already_processed_metadata_update_intent() {
         )
         .unwrap();
     assert!(unresolved_intents.is_empty());
-    assert_eq!(alix_group.group_name().unwrap(), "self metadata replay check");
+    assert_eq!(
+        alix_group.group_name().unwrap(),
+        "self metadata replay check"
+    );
 
     let metadata_updates_after = alix_group
         .find_messages(&MsgQueryArgs {
@@ -4539,8 +4554,16 @@ async fn skip_already_processed_membership_update_intent() {
 
     let members_after = alix_group.members().await.unwrap();
     assert_eq!(members_after.len(), 2);
-    assert!(members_after.iter().any(|member| member.inbox_id == alix.inbox_id()));
-    assert!(members_after.iter().any(|member| member.inbox_id == bo.inbox_id()));
+    assert!(
+        members_after
+            .iter()
+            .any(|member| member.inbox_id == alix.inbox_id())
+    );
+    assert!(
+        members_after
+            .iter()
+            .any(|member| member.inbox_id == bo.inbox_id())
+    );
 
     let membership_updates_after = alix_group
         .find_messages(&MsgQueryArgs {
@@ -4582,7 +4605,10 @@ async fn skip_already_processed_membership_removal_intent() {
         .add_members(&[bo.inbox_id(), charlie.inbox_id()])
         .await
         .unwrap();
-    alix_group.remove_members(&[charlie.inbox_id()]).await.unwrap();
+    alix_group
+        .remove_members(&[charlie.inbox_id()])
+        .await
+        .unwrap();
 
     let processed_intents_before = alix
         .context
@@ -4646,7 +4672,10 @@ async fn skip_already_processed_membership_removal_intent() {
         .iter()
         .find(|intent| intent.id == membership_removal_intent.id)
         .unwrap();
-    assert_eq!(membership_removal_intent_after.state, IntentState::Processed);
+    assert_eq!(
+        membership_removal_intent_after.state,
+        IntentState::Processed
+    );
     assert_eq!(
         (
             membership_removal_intent_after.sequence_id,
@@ -4673,8 +4702,16 @@ async fn skip_already_processed_membership_removal_intent() {
 
     let members_after = alix_group.members().await.unwrap();
     assert_eq!(members_after.len(), 2);
-    assert!(members_after.iter().any(|member| member.inbox_id == alix.inbox_id()));
-    assert!(members_after.iter().any(|member| member.inbox_id == bo.inbox_id()));
+    assert!(
+        members_after
+            .iter()
+            .any(|member| member.inbox_id == alix.inbox_id())
+    );
+    assert!(
+        members_after
+            .iter()
+            .any(|member| member.inbox_id == bo.inbox_id())
+    );
     assert!(
         !members_after
             .iter()
@@ -5039,6 +5076,197 @@ async fn external_application_sync_is_idempotent() {
         messages_after_second_sync[0].decrypted_message_bytes,
         b"external app replay check"
     );
+}
+
+#[xmtp_common::test]
+async fn own_application_sync_replay_is_idempotent() {
+    tester!(alix);
+
+    let group = alix.create_group(None, None).unwrap();
+    group
+        .send_message(b"own app replay check", SendMessageOpts::default())
+        .await
+        .unwrap();
+
+    let own_messages = alix
+        .context
+        .api()
+        .query_at(TopicKind::GroupMessagesV1.create(&group.group_id), None)
+        .await
+        .unwrap()
+        .group_messages()
+        .unwrap();
+
+    let first_result = group.process_messages(own_messages.clone()).await;
+    assert!(first_result.errored.is_empty());
+
+    let application_messages = || {
+        group
+            .find_messages(&MsgQueryArgs {
+                kind: Some(GroupMessageKind::Application),
+                ..Default::default()
+            })
+            .unwrap()
+    };
+
+    let mut processed_intents_after_first = alix
+        .context
+        .db()
+        .find_group_intents(
+            group.group_id.clone(),
+            Some(vec![IntentState::Processed]),
+            None,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|intent| {
+            (
+                intent.id,
+                intent.kind,
+                intent.state,
+                intent.sequence_id,
+                intent.originator_id,
+            )
+        })
+        .collect::<Vec<_>>();
+    processed_intents_after_first.sort_by_key(|intent| intent.0);
+    let commit_log_after_first = group
+        .local_commit_log()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|log| {
+            (
+                log.rowid,
+                log.commit_sequence_id,
+                log.commit_result,
+                log.applied_epoch_number,
+                log.commit_type,
+            )
+        })
+        .collect::<Vec<_>>();
+    let cursor_snapshots_after_first = own_messages
+        .iter()
+        .map(|message| {
+            let entity_kind = if message.is_commit() {
+                EntityKind::CommitMessage
+            } else {
+                EntityKind::ApplicationMessage
+            };
+            alix.context
+                .db()
+                .get_last_cursor_for_originator(
+                    &group.group_id,
+                    entity_kind,
+                    message.originator_id(),
+                )
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let messages_after_first_sync = application_messages();
+    let message_ids_after_first_sync = messages_after_first_sync
+        .iter()
+        .map(|message| message.id.clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(messages_after_first_sync.len(), 1);
+    assert_eq!(
+        messages_after_first_sync[0].decrypted_message_bytes,
+        b"own app replay check"
+    );
+    assert_eq!(
+        messages_after_first_sync[0].delivery_status,
+        DeliveryStatus::Published
+    );
+
+    let replay_messages = own_messages.clone();
+    let replay_result = group.process_messages(replay_messages.clone()).await;
+    assert!(replay_result.errored.is_empty());
+
+    let mut processed_intents_after_second = alix
+        .context
+        .db()
+        .find_group_intents(
+            group.group_id.clone(),
+            Some(vec![IntentState::Processed]),
+            None,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|intent| {
+            (
+                intent.id,
+                intent.kind,
+                intent.state,
+                intent.sequence_id,
+                intent.originator_id,
+            )
+        })
+        .collect::<Vec<_>>();
+    processed_intents_after_second.sort_by_key(|intent| intent.0);
+    let unresolved_intents_after_second = alix
+        .context
+        .db()
+        .find_group_intents(
+            group.group_id.clone(),
+            Some(vec![
+                IntentState::ToPublish,
+                IntentState::Published,
+                IntentState::Committed,
+                IntentState::Error,
+            ]),
+            None,
+        )
+        .unwrap();
+    let commit_log_after_second = group
+        .local_commit_log()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|log| {
+            (
+                log.rowid,
+                log.commit_sequence_id,
+                log.commit_result,
+                log.applied_epoch_number,
+                log.commit_type,
+            )
+        })
+        .collect::<Vec<_>>();
+    let cursor_snapshots_after_second = replay_messages
+        .iter()
+        .map(|message| {
+            let entity_kind = if message.is_commit() {
+                EntityKind::CommitMessage
+            } else {
+                EntityKind::ApplicationMessage
+            };
+            alix.context
+                .db()
+                .get_last_cursor_for_originator(
+                    &group.group_id,
+                    entity_kind,
+                    message.originator_id(),
+                )
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let messages_after_second_sync = application_messages();
+
+    assert_eq!(
+        messages_after_second_sync
+            .iter()
+            .map(|message| message.id.clone())
+            .collect::<Vec<_>>(),
+        message_ids_after_first_sync
+    );
+    assert_eq!(
+        processed_intents_after_second,
+        processed_intents_after_first
+    );
+    assert!(unresolved_intents_after_second.is_empty());
+    assert_eq!(commit_log_after_second, commit_log_after_first);
+    assert_eq!(cursor_snapshots_after_second, cursor_snapshots_after_first);
 }
 
 #[xmtp_common::test(flavor = "multi_thread")]

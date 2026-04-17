@@ -12,8 +12,8 @@ use tracing::instrument;
 use xmtp_common::RetryableError;
 use xmtp_db::{
     consent_record::{ConsentType, StoredConsentRecord},
-    group::{ConversationType, DmIdExt},
     encrypted_store::refresh_state::EntityKind,
+    group::{ConversationType, DmIdExt},
     prelude::{QueryDms, QueryRefreshState},
 };
 use xmtp_mls_common::group_metadata::DmMembers;
@@ -135,10 +135,9 @@ fn affected_conversation_ids_for_preference<Context: XmtpSharedContext>(
             .flatten()
             .filter(|group| {
                 group.conversation_type == ConversationType::Dm
-                    && group
-                        .dm_id
-                        .as_ref()
-                        .is_some_and(|dm_id| dm_id.other_inbox_id(context.inbox_id()) == record.entity)
+                    && group.dm_id.as_ref().is_some_and(|dm_id| {
+                        dm_id.other_inbox_id(context.inbox_id()) == record.entity
+                    })
             })
             .map(|group| vec![group.id])
             .unwrap_or_default(),
@@ -241,10 +240,7 @@ impl StreamMessages for broadcast::Receiver<LocalEvents> {
 #[cfg(test)]
 mod tests {
     use super::preference_updates_event;
-    use crate::{
-        tester,
-        worker::device_sync::preference_sync::PreferenceUpdate,
-    };
+    use crate::{tester, worker::device_sync::preference_sync::PreferenceUpdate};
     use xmtp_db::consent_record::{ConsentState, ConsentType, StoredConsentRecord};
 
     #[xmtp_common::test(unwrap_try = true)]
@@ -259,7 +255,10 @@ mod tests {
             bo.inbox_id().to_string(),
         );
 
-        let event = preference_updates_event(&alix.context, vec![PreferenceUpdate::Consent(record.clone())]);
+        let event = preference_updates_event(
+            &alix.context,
+            vec![PreferenceUpdate::Consent(record.clone())],
+        );
 
         assert_eq!(event.conversation_cursors.len(), 1);
         assert_eq!(
