@@ -267,8 +267,11 @@ impl Xmtpd {
 
     /// External URL for access through ToxiProxy.
     /// Returns hostname for unified addressing.
+    /// Uses `https://` when `use_tls` is enabled.
     pub fn external_url(&self) -> Url {
-        Url::parse(&format!("http://{}", self.hostname())).expect("valid URL")
+        let config = Config::load_unchecked();
+        let scheme = if config.use_tls { "https" } else { "http" };
+        Url::parse(&format!("{}://{}", scheme, self.hostname())).expect("valid URL")
     }
 
     /// Container name derived from the node ID.
