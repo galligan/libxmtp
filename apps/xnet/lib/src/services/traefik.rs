@@ -253,25 +253,27 @@ impl Traefik {
                         });
                     }
                     if self.use_tls {
-                        for path in ["/tmp/xnet/traefik/cert.pem", "/tmp/xnet/traefik/key.pem"] {
-                            if !std::path::Path::new(path).exists() {
+                        let cert_path = config_dir.join("cert.pem");
+                        let key_path = config_dir.join("key.pem");
+                        for path in [&cert_path, &key_path] {
+                            if !path.exists() {
                                 return Err(color_eyre::eyre::eyre!(
                                     "use_tls is enabled but {} does not exist — \
                                      deploy cert files before starting Traefik",
-                                    path
+                                    path.display()
                                 ));
                             }
                         }
                         mounts.push(Mount {
                             target: Some("/etc/traefik/cert.pem".to_string()),
-                            source: Some("/tmp/xnet/traefik/cert.pem".to_string()),
+                            source: Some(cert_path.to_string_lossy().into_owned()),
                             typ: Some(MountTypeEnum::BIND),
                             read_only: Some(true),
                             ..Default::default()
                         });
                         mounts.push(Mount {
                             target: Some("/etc/traefik/key.pem".to_string()),
-                            source: Some("/tmp/xnet/traefik/key.pem".to_string()),
+                            source: Some(key_path.to_string_lossy().into_owned()),
                             typ: Some(MountTypeEnum::BIND),
                             read_only: Some(true),
                             ..Default::default()
