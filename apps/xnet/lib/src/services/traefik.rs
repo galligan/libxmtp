@@ -32,7 +32,7 @@ use crate::{
 ///
 /// When `acme` is provided, appends a `certificatesResolvers` block
 /// for Let's Encrypt using the HTTP challenge on the `http` entrypoint.
-fn traefik_static_config(acme: Option<&AcmeConfig>) -> String {
+fn traefik_static_config(acme: Option<&AcmeConfig>, use_tls: bool) -> String {
     let mut yaml = r#"# Traefik static configuration
 entryPoints:
   http:
@@ -83,6 +83,19 @@ certificatesResolvers:
         ));
     }
 
+    if use_tls {
+        yaml.push_str(
+            r#"
+tls:
+  stores:
+    default:
+      defaultCertificate:
+        certFile: /etc/traefik/cert.pem
+        keyFile: /etc/traefik/key.pem
+"#,
+        );
+    }
+
     yaml
 }
 
@@ -108,6 +121,10 @@ pub struct Traefik {
 
     /// ACME/TLS configuration (None = no cert management)
     acme: Option<AcmeConfig>,
+
+    /// File-based TLS mode (wildcard cert)
+    #[builder(default)]
+    use_tls: bool,
 
     /// The host port for HTTP traffic (default: 80)
     #[builder(default = TraefikConst::HTTP_PORT)]
@@ -140,7 +157,7 @@ impl Traefik {
         // Write static config
         fs::write(
             &self.static_config_path,
-            traefik_static_config(self.acme.as_ref()),
+            traefik_static_config(self.acme.as_ref(), self.use_tls),
         )?;
         info!(
             "Created Traefik static config at {}",
