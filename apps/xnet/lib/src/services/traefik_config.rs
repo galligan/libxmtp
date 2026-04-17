@@ -727,4 +727,90 @@ mod tests {
         // Only 2 services (redirect router shares the service)
         assert_eq!(parsed.http.services.len(), 2);
     }
+
+    #[test]
+    fn auto_routes_get_tls_when_use_tls_enabled() {
+        let (config, file) = temp_config_tls();
+        config.add_route("node100.xmtp.run", 8150).unwrap();
+
+        let contents = fs::read_to_string(file.path()).unwrap();
+        let parsed: TraefikDynamicConfig = serde_yaml::from_str(&contents).unwrap();
+
+        let name = "node100_xmtp_run";
+        let router = parsed.http.routers.get(name).expect("HTTPS router missing");
+        assert_eq!(router.entry_points, Some(vec!["https".to_string()]));
+        let tls = router.tls.as_ref().expect("tls config missing");
+        assert!(
+            tls.cert_resolver.is_none(),
+            "file-based TLS should have no certResolver"
+        );
+
+        let redirect_name = format!("{}_redirect", name);
+        let redirect = parsed
+            .http
+            .routers
+            .get(&redirect_name)
+            .expect("redirect router missing");
+        assert_eq!(redirect.entry_points, Some(vec!["http".to_string()]));
+        assert_eq!(
+            redirect.middlewares,
+            Some(vec!["redirect-https".to_string()])
+        );
+        assert!(redirect.tls.is_none());
+
+        let mw = parsed
+            .http
+            .middlewares
+            .as_ref()
+            .expect("middlewares missing");
+        assert!(mw.contains_key("redirect-https"));
+    }
+
+    #[test]
+    fn auto_routes_no_tls_when_use_tls_disabled() {
+        let (config, file) = temp_config();
+        config.add_route("node100.xmtpd.local", 8150).unwrap();
+
+        let contents = fs::read_to_string(file.path()).unwrap();
+        let parsed: TraefikDynamicConfig = serde_yaml::from_str(&contents).unwrap();
+
+        let router = parsed
+            .http
+            .routers
+            .get("node100_xmtpd_local")
+            .expect("router missing");
+        assert!(router.tls.is_none());
+        assert!(router.entry_points.is_none());
+        assert!(router.middlewares.is_none());
+        assert!(!parsed
+            .http
+            .routers
+            .contains_key("node100_xmtpd_local_redirect"));
+    }
+
+    #[test]
+    fn extra_route_tls_uses_file_cert_when_use_tls_enabled() {
+        let (config, file) = temp_config_tls();
+        config
+            .set_extra_routes(vec![ExtraTraefikRoute {
+                name: "status-page".to_string(),
+                rule: "Host(`migrate.xmtp.run`)".to_string(),
+                url: "http://xnet-status:8899".to_string(),
+                priority: Some(100),
+                tls: true,
+            }])
+            .unwrap();
+
+        let contents = fs::read_to_string(file.path()).unwrap();
+        let parsed: TraefikDynamicConfig = serde_yaml::from_str(&contents).unwrap();
+
+        let router = parsed
+            .http
+            .routers
+            .get("status-page")
+            .expect("HTTPS router missing");
+        let tls = router.tls.as_ref().expect("tls config missing");
+        assert!(tls.cert_resolver.is_none());
+        assert_eq!(router.entry_points, Some(vec!["https".to_string()]));
+    }
 }
