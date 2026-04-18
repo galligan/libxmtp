@@ -1,3 +1,10 @@
+//! Group lifecycle surfaces layered on top of the OpenMLS state machine.
+//!
+//! `MlsGroup` is the long-lived facade that callers interact with. The surrounding modules split
+//! responsibilities like creation, membership changes, message publishing, metadata updates, and
+//! sync/replay so those concerns can evolve independently without changing the binding-facing
+//! shape of the type.
+
 pub mod commit_log;
 pub mod commit_log_key;
 mod error;
@@ -120,10 +127,15 @@ const MAX_GROUP_NAME_LENGTH: usize = 100;
 const MAX_GROUP_IMAGE_URL_LENGTH: usize = 2048;
 const MAX_APP_DATA_LENGTH: usize = 8192;
 
-/// An LibXMTP MlsGroup
+/// Binding-facing handle for one XMTP conversation.
+///
+/// `MlsGroup` deliberately keeps a small amount of durable identity plus the shared context needed
+/// to load and mutate MLS state on demand. Most operations reacquire the stored OpenMLS group
+/// under the appropriate lock instead of caching mutable state on the struct itself, which keeps
+/// clones cheap and prevents bindings from observing stale in-memory state.
+///
 /// _NOTE:_ The Eq implementation compares [`GroupId`], so a dm group with the same identity will be
-/// different.
-/// the Hash implementation hashes the [`GroupId`]
+/// different. The Hash implementation hashes the [`GroupId`].
 pub struct MlsGroup<Context> {
     pub group_id: Vec<u8>,
     pub dm_id: Option<String>,
@@ -287,7 +299,11 @@ impl<Context> MlsGroup<Context>
 where
     Context: XmtpSharedContext,
 {
-    // Creates a new group instance. Does not validate that the group exists in the DB
+    /// Creates a lightweight handle without checking that backing storage already exists.
+    ///
+    /// This is useful when higher-level callers already own the database row or are reconstructing
+    /// a group from adjacent query results. Callers that need existence validation should prefer
+    /// [`Self::new_cached`].
     pub fn new(
         context: Context,
         group_id: Vec<u8>,
@@ -304,8 +320,7 @@ where
         )
     }
 
-    /// Creates a new group instance from the database. Validate that the group exists in the DB before constructing
-    /// the group.
+    /// Creates a new handle after confirming the group exists in local storage.
     ///
     /// # Returns
     ///
@@ -332,6 +347,10 @@ where
         }
     }
 
+    /// Internal constructor that reuses the context-scoped mutex registry.
+    ///
+    /// Every `MlsGroup` for the same `group_id` must share the same mutex so async callers serialize
+    /// local OpenMLS mutations even when the binding layer creates multiple handles.
     pub(crate) fn new_from_arc(
         context: Context,
         group_id: Vec<u8>,
