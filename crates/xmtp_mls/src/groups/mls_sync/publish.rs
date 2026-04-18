@@ -1,8 +1,15 @@
+//! Local-intent publishing and staged-commit capture.
+//!
+//! Publishing is where local intent state becomes network-visible work. The
+//! helpers here keep staged commit snapshots and payload hashes aligned so the
+//! later receive path can recognize its own messages deterministically.
+
 use super::*;
 use crate::groups::group_membership::GroupMembership;
 use crate::identity_updates::{IdentityStateContext, load_identity_updates};
 use openmls_traits::signatures::Signer;
 
+/// Build publish payloads for a group-context extension update without persisting the commit yet.
 fn build_group_context_extensions_publish_data<S, SignerT>(
     storage: &S,
     openmls_group: &mut OpenMlsGroup,
@@ -28,6 +35,7 @@ where
     })
 }
 
+/// Refresh membership sequence ids before generating publish payloads that depend on them.
 async fn refresh_membership_sequence_ids<Context>(
     context: &Context,
     membership: &mut GroupMembership,
@@ -59,6 +67,10 @@ impl<Context> MlsGroup<Context>
 where
     Context: XmtpSharedContext,
 {
+    /// Publish every locally pending intent in durable order.
+    ///
+    /// Each intent is marked `Published` before transport send so the receive
+    /// path can correlate the returning payload with the staged commit snapshot.
     #[tracing::instrument]
     pub(in crate::groups) async fn publish_intents(&self) -> Result<(), GroupError> {
         let db = self.context.db();
@@ -209,8 +221,10 @@ where
         .await
     }
 
-    // Takes a StoredGroupIntent and returns the payload and post commit data as a tuple
-    // A return value of [`Option::None`] means this intent would not change the group.
+    /// Derive the payloads and staged side effects for one pending intent.
+    ///
+    /// Returning `None` means the intent is already a no-op against current
+    /// state and can be marked processed without publishing network traffic.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(level = "trace", skip_all)]
     async fn get_publish_intent_data(

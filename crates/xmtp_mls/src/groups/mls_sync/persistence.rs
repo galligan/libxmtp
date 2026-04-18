@@ -1,7 +1,13 @@
+//! Durable side effects that outlive one sync attempt.
+//!
+//! This module is where successfully validated work becomes transcript rows,
+//! cursor movement, mirrored metadata, and post-error bookkeeping.
+
 use super::*;
 use crate::groups::QueryableContentFields;
 use xmtp_common::{MaybeSend, MaybeSync};
 
+/// Storage hooks needed when sync detects evidence of a fork.
 pub(super) trait ForkDetectionContext: MaybeSend + MaybeSync {
     fn inbox_id(&self) -> InboxIdRef<'_>;
     fn installation_id_string(&self) -> String;
@@ -12,6 +18,7 @@ pub(super) trait ForkDetectionContext: MaybeSend + MaybeSync {
     ) -> Result<(), StorageError>;
 }
 
+/// Post-processing hooks that intentionally happen outside the main apply path.
 pub(super) trait ReceivePostProcessContext: ForkDetectionContext {
     fn prune_icebox(&self) -> Result<(), GroupMessageProcessingError>;
     fn set_group_paused(
@@ -61,6 +68,7 @@ where
     }
 }
 
+/// Record a likely fork only when the epoch mismatch points forward in time.
 fn mark_probable_fork<Context>(
     context: &Context,
     group_id: &[u8],
@@ -87,6 +95,7 @@ where
     Ok(())
 }
 
+/// Best-effort cleanup after a successful receive pass.
 pub(super) fn prune_processed_icebox<Context>(
     context: &Context,
 ) -> Result<(), GroupMessageProcessingError>
@@ -97,6 +106,7 @@ where
     Ok(())
 }
 
+/// Pause a group when we prove local protocol support is too old to continue safely.
 pub(super) fn pause_group_for_protocol_version<Context>(
     context: &Context,
     group_id: &[u8],
@@ -117,7 +127,11 @@ impl<Context> MlsGroup<Context>
 where
     Context: XmtpSharedContext,
 {
-    /// In case of metadataUpdate will extract the updated fields and store them to the db
+    /// Mirror metadata writes from a local intent into the group row.
+    ///
+    /// These updates are visible before the matching transcript message is
+    /// observed again from the network, so the local DB view stays consistent
+    /// with the intent state machine.
     pub(super) fn handle_metadata_update_from_intent(
         &self,
         intent: &StoredGroupIntent,
@@ -146,6 +160,7 @@ where
         Ok(())
     }
 
+    /// Mirror metadata changes derived from a validated remote commit.
     pub(super) fn handle_metadata_update_from_commit(
         &self,
         metadata_field_changes: &Vec<group_updated::MetadataFieldChange>,
@@ -178,6 +193,7 @@ where
         Ok(())
     }
 
+    /// Advance the per-originator cursor if this message is newer than durable state.
     #[tracing::instrument(skip_all, level = "trace")]
     pub(super) fn maybe_update_cursor(
         &self,
@@ -199,6 +215,11 @@ where
         Ok(updated)
     }
 
+    /// Persist the derived `GroupUpdated` transcript row for a validated commit.
+    ///
+    /// This is intentionally the point where commit metadata is mirrored and
+    /// DM-stitch dedupe is checked, because both decisions depend on the fully
+    /// validated commit payload rather than raw MLS bytes.
     pub(super) fn save_transcript_message(
         &self,
         validated_commit: ValidatedCommit,
@@ -268,6 +289,7 @@ where
         Ok(Some((msg, payload)))
     }
 
+    /// Persist a fully decoded external application message.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn persist_external_application_message(
         &self,
@@ -305,6 +327,7 @@ where
         Ok(message)
     }
 
+    /// Apply local mirrors that must survive even when transcript dedupe wins.
     fn apply_commit_metadata_mirror(
         &self,
         payload: &GroupUpdated,
@@ -317,6 +340,10 @@ where
         self.handle_metadata_update_from_commit(&payload.metadata_field_changes, storage)
     }
 
+    /// Finalize the durable side effects of an applied staged commit.
+    ///
+    /// Transcript persistence, pending-remove cleanup, and super-admin updates
+    /// all derive from the same validated commit and need to stay in lockstep.
     pub(super) fn finalize_applied_staged_commit(
         &self,
         mls_group: &OpenMlsGroup,
@@ -350,6 +377,7 @@ where
         Ok(transcript)
     }
 
+    /// Mark a locally-authored application message as durably published.
     pub(super) fn finalize_published_own_application_message(
         &self,
         mls_group: &OpenMlsGroup,
@@ -370,6 +398,7 @@ where
         Ok(())
     }
 
+    /// Check whether a stitched DM has already materialized an equivalent update.
     pub(super) fn update_already_exists(
         &self,
         payload: &GroupUpdated,
@@ -410,6 +439,7 @@ where
         Ok(deduper.is_dupe(payload))
     }
 
+    /// Escalate epoch-validation failures into fork detection only for forward jumps.
     pub(super) async fn process_group_message_error_for_fork_detection(
         &self,
         message_cursor: u64,

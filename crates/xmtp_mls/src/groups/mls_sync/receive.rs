@@ -1,9 +1,20 @@
+//! Receive-phase coordination and error handling.
+//!
+//! The receive path favors preserving useful progress over failing fast: it
+//! records non-retryable failures, defers fork detection to the persistence
+//! layer, and only aborts the batch when retryable ordering guarantees are at
+//! risk.
+
 use super::*;
 
 impl<Context> MlsGroup<Context>
 where
     Context: XmtpSharedContext,
 {
+    /// Record best-effort bookkeeping for a non-retryable failure.
+    ///
+    /// Failing to persist this bookkeeping should not hide the original
+    /// processing error; at worst the same bad envelope may be observed again.
     fn post_process_non_retryable_error_transaction<Provider>(
         &self,
         provider: &Provider,
@@ -41,6 +52,7 @@ where
         Ok(())
     }
 
+    /// Apply non-retryable bookkeeping only while the group remains active.
     fn post_process_non_retryable_error(
         &self,
         mls_group: &OpenMlsGroup,
@@ -63,6 +75,11 @@ where
         }
     }
 
+    /// Normalize post-processing for one envelope result.
+    ///
+    /// Successful applies prune deferred cleanup. Validation failures that
+    /// indicate an unsupported protocol version pause the group instead of
+    /// letting receive continue into guaranteed failures.
     pub(super) async fn post_process_message(
         &self,
         mls_group: &OpenMlsGroup,
@@ -120,6 +137,10 @@ where
         Ok(message)
     }
 
+    /// Process a batch of queried messages in cursor order.
+    ///
+    /// Retryable failures stop the batch so later envelopes do not build on top
+    /// of missing causal history.
     #[cfg_attr(
         any(test, feature = "test-utils"),
         tracing::instrument(level = "info", skip_all, fields(who = %self.context.inbox_id()))
@@ -167,10 +188,11 @@ where
         summary
     }
 
-    /// Receive messages from the last cursor network and try to process each message
-    /// Return all the cursors of the messages we tried to process regardless
-    /// if they were successful or not. It is important to return _all_
-    /// cursor ids, so that streams do not unintentionally retry O(n^2) messages.
+    /// Query the network-backed store and process every fetched envelope.
+    ///
+    /// The summary intentionally includes every attempted cursor so streaming
+    /// callers can advance their own bookkeeping without re-fetching an
+    /// ever-growing prefix of already-seen messages.
     #[tracing::instrument(skip_all, level = "trace")]
     pub async fn receive(&self) -> Result<ProcessSummary, GroupError> {
         let messages = MlsStore::new(self.context.clone())
