@@ -1,3 +1,10 @@
+//! Device-sync client surfaces and shared types.
+//!
+//! Device sync is the cross-installation coordination layer that handles backup
+//! export/import, sync-group message exchange, and preference replication. The
+//! modules here are split so bindings and workers can share the same core logic
+//! without depending on each other's runtime concerns.
+
 use crate::{
     client::ClientError,
     context::XmtpSharedContext,
@@ -218,6 +225,12 @@ impl From<NotFound> for DeviceSyncError {
 }
 
 #[derive(Clone)]
+/// Binding- and worker-facing facade over the device-sync subsystem.
+///
+/// `DeviceSyncClient` keeps the sync-specific collaborators together so callers
+/// can perform archive operations, send or receive sync-group payloads, and wait
+/// for the long-running worker to become ready without rebuilding per-call
+/// dependencies.
 pub struct DeviceSyncClient<Context> {
     pub(crate) context: Context,
     pub(crate) welcome_service: WelcomeService<Context>,
@@ -226,6 +239,7 @@ pub struct DeviceSyncClient<Context> {
 }
 
 impl<Context: XmtpSharedContext> DeviceSyncClient<Context> {
+    /// Creates the shared device-sync facade used by workers and binding entrypoints.
     pub fn new(context: Context, metrics: Arc<WorkerMetrics<SyncMetric>>) -> Self {
         Self {
             context: context.clone(),
@@ -253,6 +267,9 @@ where
     }
 
     /// Blocks until the sync worker notifies that it is initialized and running.
+    ///
+    /// Binding callers use this to avoid racing archive or sync-group requests
+    /// against worker startup when a client has just been created.
     pub async fn wait_for_sync_worker_init(&self) -> Result<(), xmtp_common::time::Expired> {
         self.metrics.wait_for_init().await
     }

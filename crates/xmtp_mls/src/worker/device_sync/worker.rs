@@ -1,3 +1,10 @@
+//! Long-running device-sync worker wiring.
+//!
+//! The worker owns the background subscription loop for sync-group events. This
+//! file keeps the worker/runtime integration separate from the core
+//! `DeviceSyncClient` so bindings can reuse the same archive/sync APIs without
+//! depending on worker task management details.
+
 use super::DeviceSyncClient;
 use crate::{
     context::XmtpSharedContext,
@@ -11,6 +18,7 @@ use futures::TryFutureExt;
 use std::sync::Arc;
 use tokio::sync::{OnceCell, broadcast};
 
+/// Background worker that consumes sync-group events for a single installation.
 pub struct SyncWorker<Context> {
     pub(super) client: DeviceSyncClient<Context>,
     pub(super) receiver: broadcast::Receiver<SyncWorkerEvent>,
@@ -22,6 +30,7 @@ impl<Context> SyncWorker<Context>
 where
     Context: XmtpSharedContext + 'static,
 {
+    /// Subscribes to worker events and initializes the shared device-sync facade.
     pub fn new(context: Context, metrics: Option<DynMetrics>) -> Self {
         let receiver = context.worker_events().subscribe();
         let metrics = metrics
