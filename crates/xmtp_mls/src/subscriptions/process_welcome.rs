@@ -1,18 +1,28 @@
+//! Welcome processing for conversation streams.
+//!
+//! This future is the bridge between the raw "welcome or known group" inputs
+//! emitted by subscription plumbing and the higher-level `MlsGroup` values that
+//! conversation streams expose to callers. It owns the bootstrap rules around:
+//! - deduplicating welcomes that are already persisted,
+//! - reloading groups after welcome sync has materialized them locally, and
+//! - attaching the cursor metadata that downstream stream consumers need for
+//!   follow-on message replay.
+
+mod filtering;
+mod loading;
+
 use super::Result;
 use crate::context::XmtpSharedContext;
-use crate::groups::GroupError;
-use crate::groups::InitialMembershipValidator;
-use crate::groups::welcome_sync::WelcomeService;
-use crate::intents::ProcessIntentError;
 use crate::{groups::MlsGroup, subscriptions::WelcomeOrGroup};
+use filtering::WelcomeFilterConfig;
 use std::collections::HashSet;
-use xmtp_common::{Retry, retry_async};
-use xmtp_db::{consent_record::ConsentState, group::ConversationType, prelude::*};
-use xmtp_proto::types::OriginatorId;
-use xmtp_proto::types::SequenceId;
-use xmtp_proto::types::{Cursor, WelcomeMessage};
+use xmtp_db::{
+    consent_record::ConsentState, encrypted_store::refresh_state::EntityKind,
+    group::ConversationType, prelude::QueryRefreshState,
+};
+use xmtp_proto::types::{Cursor, GlobalCursor, WelcomeMessage};
 
-/// Future for processing `WelcomeorGroup`
+/// Future for processing a `WelcomeOrGroup` item into a streamable conversation.
 pub struct ProcessWelcomeFuture<Context> {
     /// welcome ids in DB and which are already processed
     known_welcome_ids: HashSet<Cursor>,
@@ -20,29 +30,25 @@ pub struct ProcessWelcomeFuture<Context> {
     context: Context,
     /// the welcome or group being processed in this future
     item: WelcomeOrGroup,
-    /// Conversation type to filter for, if any.
-    conversation_type: Option<ConversationType>,
-    /// To skip or include duplicate dms in the stream
-    include_duplicate_dms: bool,
-    /// Consent states to filter for, if any.
-    consent_states: Option<Vec<ConsentState>>,
+    /// Filter policy for conversation type, duplicate DM handling, and consent state.
+    filters: WelcomeFilterConfig,
 }
 
 pub enum ProcessWelcomeResult<Context> {
-    /// New Group and welcome id
+    /// A newly materialized group paired with the welcome cursor that created it.
     New {
         group: MlsGroup<Context>,
         id: Cursor,
     },
-    /// A group we already have/we created that might not have a welcome id
+    /// A group that already exists locally and may not have a welcome cursor.
     NewStored {
         group: MlsGroup<Context>,
         maybe_sequence_id: Option<i64>,
         maybe_originator: Option<i64>,
     },
-    /// Skip this welcome but add and id to known welcome ids
+    /// Skip this welcome but remember its cursor so we do not reprocess it.
     IgnoreId { id: Cursor },
-    /// Skip this payload
+    /// Skip this payload without mutating dedupe state.
     Ignore,
 }
 
@@ -83,14 +89,16 @@ where
             known_welcome_ids,
             context,
             item,
-            conversation_type,
-            include_duplicate_dms,
-            consent_states,
+            filters: WelcomeFilterConfig::new(
+                conversation_type,
+                include_duplicate_dms,
+                consent_states,
+            ),
         })
     }
 }
 
-/// bulk of the processing for a new welcome/group
+/// The main welcome/group bootstrap logic for conversation streams.
 impl<Context> ProcessWelcomeFuture<Context>
 where
     Context: XmtpSharedContext,
@@ -137,10 +145,14 @@ where
                     );
                     if let Ok(Some(group)) = self.load_from_store(welcome.cursor) {
                         return self
-                            .filter(ProcessWelcomeResult::New {
-                                group,
-                                id: welcome.cursor,
-                            })
+                            .filters
+                            .filter_processed(
+                                &self.context,
+                                ProcessWelcomeResult::New {
+                                    group,
+                                    id: welcome.cursor,
+                                },
+                            )
                             .await;
                     }
                 }
@@ -150,8 +162,10 @@ where
                 );
                 // sync welcome from the network
                 if let Some(group) = self.on_welcome(welcome).await? {
+                    let stream_seed_cursor =
+                        self.stream_attach_cursor_for_group(&group.group_id)?;
                     ProcessWelcomeResult::New {
-                        group,
+                        group: group.with_stream_seed_cursor(stream_seed_cursor),
                         id: welcome.cursor,
                     }
                 } else {
@@ -159,9 +173,32 @@ where
                     ProcessWelcomeResult::IgnoreId { id: welcome.cursor }
                 }
             }
-            Group(ref id) => {
+            Group {
+                ref id,
+                catch_up_before_stream,
+                ref attach_cursor,
+                replay_after_ns,
+            } => {
                 tracing::info!("stream got existing group, pulling from db.");
-                let (group, stored_group) = MlsGroup::new_cached(self.context.clone(), id)?;
+                let (mut group, mut stored_group) = MlsGroup::new_cached(self.context.clone(), id)?;
+
+                if catch_up_before_stream
+                    && self
+                        .filters
+                        .should_include_group(&self.context, &group, false)
+                        .await?
+                {
+                    group.sync().await?;
+                    (group, stored_group) = MlsGroup::new_cached(self.context.clone(), id)?;
+                }
+                let stream_seed_cursor = if attach_cursor.is_some() {
+                    attach_cursor.clone()
+                } else {
+                    self.stream_attach_cursor_for_group(id.as_slice())?
+                };
+                let group = group
+                    .with_stream_seed_cursor(stream_seed_cursor)
+                    .with_stream_replay_after_ns(replay_after_ns);
 
                 ProcessWelcomeResult::NewStored {
                     group,
@@ -170,118 +207,9 @@ where
                 }
             }
         };
-        self.filter(process_result).await
-    }
-
-    /// Checks whether a group should be included in the stream based on filtering rules.
-    ///
-    /// Returns `Ok(true)` if the group should be included in the stream,
-    /// `Ok(false)` if it should be filtered out.
-    ///
-    /// # Arguments
-    /// * `group` - The group to check
-    /// * `check_virtual` - Whether to filter out virtual groups (only for new welcomes)
-    ///
-    /// # Filtering Rules
-    /// 1. Virtual groups are filtered out only if `check_virtual` is true
-    /// 2. Duplicate DMs are filtered out if `include_duplicate_dms` is false
-    /// 3. Conversation type must match if a filter is specified
-    /// 4. Consent state must match if a filter is specified
-    ///
-    /// # Errors
-    /// Returns an error if retrieving group metadata or consent state fails
-    async fn should_include_group(
-        &self,
-        group: &MlsGroup<Context>,
-        check_virtual: bool,
-    ) -> Result<bool> {
-        let metadata = group.metadata().await?;
-
-        // Filter out virtual groups (only for new welcomes, not stored groups)
-        if check_virtual && metadata.conversation_type.is_virtual() {
-            tracing::debug!("Virtual group welcome processed. Skipping stream.");
-            return Ok(false);
-        }
-
-        // Filter out duplicate DMs if not included
-        if !self.include_duplicate_dms
-            && metadata.conversation_type == ConversationType::Dm
-            && self.context.db().has_duplicate_dm(&group.group_id)?
-        {
-            tracing::debug!("Duplicate DM group detected. Skipping stream.");
-            return Ok(false);
-        }
-
-        // Check conversation type filter
-        let conversation_type_match = self
-            .conversation_type
-            .is_none_or(|ct| ct == metadata.conversation_type);
-
-        // Check consent state filter
-        let consent_state_match = if let Some(ref consent_states) = self.consent_states {
-            consent_states.contains(&group.consent_state()?)
-        } else {
-            true
-        };
-
-        Ok(conversation_type_match && consent_state_match)
-    }
-
-    /// Applies conversation type and consent state filtering to processed welcome results.
-    ///
-    /// After a welcome message or group has been processed, this function determines
-    /// whether it should be streamed to the client based on filtering rules.
-    ///
-    /// The function modifies the `ProcessWelcomeResult` to indicate whether the
-    /// conversation should be streamed, ignored but tracked, or completely ignored.
-    ///
-    /// # Arguments
-    /// * `processed` - The initial processing result from handling the welcome/group
-    ///
-    /// # Returns
-    /// * `Result<ProcessWelcomeResult<C>>` - The filtered result, potentially
-    ///   changing the handling instruction
-    ///
-    /// # Errors
-    /// Returns an error if retrieving group metadata or applying filters fails
-    async fn filter(
-        &self,
-        processed: ProcessWelcomeResult<Context>,
-    ) -> Result<ProcessWelcomeResult<Context>> {
-        use super::ProcessWelcomeResult::*;
-        match processed {
-            New { group, id } => {
-                // For new welcomes, filter out virtual groups
-                if self.should_include_group(&group, true).await? {
-                    Ok(ProcessWelcomeResult::New { group, id })
-                } else {
-                    Ok(ProcessWelcomeResult::IgnoreId { id })
-                }
-            }
-            NewStored {
-                group,
-                maybe_sequence_id,
-                maybe_originator,
-            } => {
-                // For stored groups, don't filter out virtual groups
-                if self.should_include_group(&group, false).await? {
-                    Ok(ProcessWelcomeResult::NewStored {
-                        group,
-                        maybe_sequence_id,
-                        maybe_originator,
-                    })
-                } else if let Some(id) = maybe_sequence_id
-                    && let Some(originator) = maybe_originator
-                {
-                    Ok(ProcessWelcomeResult::IgnoreId {
-                        id: Cursor::new(id as SequenceId, originator as OriginatorId),
-                    })
-                } else {
-                    Ok(ProcessWelcomeResult::Ignore)
-                }
-            }
-            other => Ok(other),
-        }
+        self.filters
+            .filter_processed(&self.context, process_result)
+            .await
     }
 
     /// Processes a new welcome message by syncing with the network.
@@ -312,58 +240,28 @@ where
             welcome_id = %welcome.cursor,
             "Trying to process streamed welcome"
         );
-        self.process_welcome(welcome).await
-    }
-
-    async fn process_welcome(&self, welcome: &WelcomeMessage) -> Result<Option<MlsGroup<Context>>> {
-        let welcomes = WelcomeService::new(self.context.clone());
-        let res = retry_async!(
-            Retry::default(),
-            (async {
-                let validator = InitialMembershipValidator::new(&self.context);
-                welcomes
-                    .process_new_welcome(welcome, false, validator)
-                    .await
-            })
-        );
-
-        let id = welcome.cursor;
-        if let Ok(maybe_group) = res {
-            Ok(maybe_group)
-        } else if let Err(GroupError::ProcessIntent(ProcessIntentError::WelcomeAlreadyProcessed(
-            _,
-        ))) = res
-        {
-            self.load_from_store(id)
-        } else {
-            Err(res.expect_err("Checked for Ok value").into())
-        }
+        loading::process_welcome_from_network(&self.context, welcome).await
     }
 
     /// Load a group from disk by its welcome_id
     fn load_from_store(&self, cursor: Cursor) -> Result<Option<MlsGroup<Context>>> {
-        let maybe_group = self.context.db().find_group_by_sequence_id(cursor)?;
-        let Some(group) = maybe_group else {
-            tracing::warn!(
-                welcome_id = %cursor,
-                "Already processed welcome not loaded from store (likely pre-existing group or oneshot message)"
-            );
-            return Ok(None);
-        };
-        tracing::info!(
-            inbox_id = self.context.inbox_id(),
-            group_id = hex::encode(&group.id),
-            dm_id = group.dm_id,
-            welcome_id = ?group.sequence_id,
-            "loading existing group for welcome_id: {:?}",
-            group.cursor()
-        );
-        Ok(Some(MlsGroup::new(
-            self.context.clone(),
-            group.id,
-            group.dm_id,
-            group.conversation_type,
-            group.created_at_ns,
-        )))
+        loading::load_from_store(&self.context, cursor)
+    }
+
+    /// Finds the latest attach cursor for replayable content in this group.
+    ///
+    /// Conversation streams use this cursor as the hand-off point between
+    /// "bootstrap the group exists" and "replay messages that should now be
+    /// attached to the stream".
+    fn stream_attach_cursor_for_group(&self, group_id: &[u8]) -> Result<Option<GlobalCursor>> {
+        Ok(self
+            .context
+            .db()
+            .get_last_cursor_for_ids(
+                &[group_id.to_vec()],
+                &[EntityKind::ApplicationMessage, EntityKind::CommitMessage],
+            )?
+            .get(group_id)
+            .cloned())
     }
 }

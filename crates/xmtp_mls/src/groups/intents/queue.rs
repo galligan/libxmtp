@@ -258,6 +258,8 @@ mod tests {
             mls_commit_lock: Arc::new(Default::default()),
             mutex: Arc::new(Mutex::new(())),
             conversation_type: xmtp_db::group::ConversationType::Dm,
+            stream_seed_cursor: None,
+            stream_replay_after_ns: None,
         }
     }
 

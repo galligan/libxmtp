@@ -1,7 +1,10 @@
 #[cfg(any(test, feature = "test-utils"))]
 pub mod stream_stats;
+mod subscription;
 #[cfg(any(test, feature = "test-utils"))]
 mod test_utils;
+#[cfg(test)]
+mod tests;
 mod types;
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -25,15 +28,13 @@ use pin_project::{pin_project, pinned_drop};
 use std::{
     borrow::Cow,
     collections::VecDeque,
-    future::Future,
     pin::Pin,
     task::{Poll, ready},
 };
 use xmtp_common::{BoxDynFuture, Event};
 use xmtp_db::group_message::StoredGroupMessage;
+use xmtp_proto::api_client::XmtpMlsStreams;
 use xmtp_proto::types::{Cursor, GlobalCursor, OriginatorId, SequenceId};
-use xmtp_proto::types::{GroupId, Topic};
-use xmtp_proto::{api_client::XmtpMlsStreams, types::TopicCursor};
 
 impl xmtp_common::RetryableError for MessageStreamError {
     fn is_retryable(&self) -> bool {
@@ -60,7 +61,7 @@ pub struct StreamGroupMessages<
     factory: Factory,
     context: Cow<'a, Context>,
     groups: GroupList,
-    add_queue: VecDeque<MlsGroup<Context>>,
+    add_queue: VecDeque<(MlsGroup<Context>, Option<GlobalCursor>)>,
     returned: Vec<Cursor>,
     got: Vec<Cursor>,
 }
@@ -103,203 +104,6 @@ enum State<'a, Out> {
 pub(super) type MessagesApiSubscription<'a, ApiClient> =
     <ApiClient as XmtpMlsStreams>::GroupMessageStream;
 
-impl<'a, Context> StreamGroupMessages<'a, Context, MessagesApiSubscription<'a, Context::ApiClient>>
-where
-    Context: XmtpSharedContext + 'a,
-    Context::ApiClient: XmtpMlsStreams + 'a,
-{
-    /// Creates a new stream for receiving group messages.
-    ///
-    /// Initializes a subscription to messages for the specified groups
-    ///
-    /// # Arguments
-    /// * `context` - Reference to the local context
-    /// * `groups` - List of group IDs to subscribe to
-    ///
-    /// # Returns
-    /// * `Result<Self>` - A new message stream if successful, or an error if initialization fails
-    ///
-    /// # Errors
-    /// May return errors if:
-    /// - Querying the latest messages fails
-    /// - Message extraction fails
-    /// - Creating the subscription fails
-    pub async fn new(context: &'a Context, groups: Vec<GroupId>) -> Result<Self> {
-        log_event!(
-            Event::StreamOpened,
-            context.installation_id(),
-            kind = ?StreamKind::Messages
-        );
-        Self::new_with_factory(
-            Cow::Borrowed(context),
-            groups,
-            ProcessMessageFuture::new(context.clone()),
-        )
-        .await
-    }
-
-    pub async fn from_cow(context: Cow<'a, Context>, groups: Vec<GroupId>) -> Result<Self> {
-        Self::new_with_factory(
-            context.clone(),
-            groups,
-            ProcessMessageFuture::new(context.as_ref().clone()),
-        )
-        .await
-    }
-}
-
-impl<C> StreamGroupMessages<'static, C, MessagesApiSubscription<'static, C::ApiClient>>
-where
-    C: XmtpSharedContext + 'static,
-    C::ApiClient: XmtpMlsStreams + 'static,
-    C::Db: 'static,
-{
-    pub async fn new_owned(context: C, groups: Vec<GroupId>) -> Result<Self> {
-        let f = ProcessMessageFuture::new(context.clone());
-        Self::new_with_factory(Cow::Owned(context), groups, f).await
-    }
-}
-
-impl<'a, C, Factory> StreamGroupMessages<'a, C, MessagesApiSubscription<'a, C::ApiClient>, Factory>
-where
-    C: XmtpSharedContext + 'a,
-    C::ApiClient: XmtpMlsStreams + 'a,
-    Factory: ProcessFutureFactory<'a> + 'a,
-{
-    pub async fn new_with_factory(
-        context: Cow<'a, C>,
-        groups: Vec<GroupId>,
-        factory: Factory,
-    ) -> Result<Self> {
-        tracing::debug!("setting up messages subscription");
-        let api = context.api();
-
-        // Get the last sync cursor for each group to populate seen messages
-        use xmtp_db::encrypted_store::refresh_state::{EntityKind, QueryRefreshState};
-        use xmtp_db::group_message::QueryGroupMessage;
-
-        let db = context.db();
-        let cursors_by_group = db.get_last_cursor_for_ids(
-            &groups,
-            &[EntityKind::ApplicationMessage, EntityKind::CommitMessage],
-        )?;
-
-        // Get all cursors of messages newer than last sync for each group
-        // to populate seen messages
-        let seen_cursors_vec = db.messages_newer_than(&cursors_by_group)?;
-
-        let seen_cursors: std::collections::HashSet<_> = seen_cursors_vec.into_iter().collect();
-
-        let mut topic_cursor = TopicCursor::default();
-        for group_id in &groups {
-            let cursor = cursors_by_group
-                .get(group_id.as_slice())
-                .cloned()
-                .unwrap_or_default();
-            topic_cursor.add(Topic::new_group_message(group_id.clone()), cursor);
-        }
-
-        let groups_list = GroupList::new(topic_cursor, seen_cursors.clone());
-
-        let subscription = api
-            .subscribe_group_messages(&groups.iter().collect::<Vec<_>>())
-            .await?;
-
-        Ok(Self {
-            inner: subscription,
-            context,
-            state: Default::default(),
-            groups: groups_list,
-            got: Default::default(),
-            returned: Default::default(),
-            add_queue: Default::default(),
-            factory,
-        })
-    }
-
-    /// Adds a new group to the existing message stream.
-    ///
-    /// This method allows dynamically extending the subscription to include
-    /// messages from an additional group without recreating the entire stream.
-    ///
-    /// The process involves:
-    /// 1. Checking if the group is already part of the stream
-    /// 2. Adding the group to the tracking list
-    /// 3. Re-establishing the subscription with the updated group list
-    ///
-    /// # Arguments
-    /// * `group` - The MLS group to add to the stream
-    ///
-    /// # Note
-    /// This is an asynchronous operation that transitions the stream to the `Adding` state.
-    /// The actual subscription update happens when the stream is polled.
-    pub(super) fn add(mut self: Pin<&mut Self>, group: MlsGroup<C>) {
-        if self.add_queue.iter().any(|g| g.group_id == group.group_id) {
-            tracing::debug!("group {} already queued", hex::encode(&group.group_id));
-            return;
-        }
-        tracing::debug!(
-            "queuing group {} for {}",
-            hex::encode(&group.group_id),
-            if self.groups.contains(&group.group_id) {
-                "re-subscription"
-            } else {
-                "add"
-            }
-        );
-        let this = self.as_mut().project();
-        this.add_queue.push_back(group);
-    }
-
-    /// Internal API to re-subscribe to a message stream.
-    /// Re-subscribes to the message stream with an updated group list.
-    ///
-    /// Creates a new subscription that includes the specified new group,
-    /// while maintaining existing subscriptions for other groups.
-    ///
-    /// This function:
-    /// 1. Determines the appropriate cursor position for the new group
-    /// 2. Updates filters for all groups
-    /// 3. Establishes a new subscription with the updated filters
-    ///
-    /// # Arguments
-    /// * `context` - Reference to the client used for API communication
-    /// * `groups_with_positions` - List of tuples containing group IDs and their current positions
-    /// * `new_group` - ID of the new group to add
-    ///
-    /// # Returns
-    /// * `Result<(MessagesApiSubscription<'a, C>, Vec<u8>, Option<Cursor>)>` - A tuple containing:
-    ///   - The new message subscription
-    ///   - The ID of the newly added group
-    ///   - The cursor position for the new group (if available)
-    ///
-    /// # Errors
-    /// May return errors if:
-    /// - Creating the new subscription fails
-    #[tracing::instrument(level = "trace", skip(context, new_group), fields(new_group = hex::encode(&new_group)))]
-    #[allow(clippy::type_complexity)]
-    async fn subscribe(
-        context: Cow<'a, C>,
-        topic_cursor: TopicCursor,
-        new_group: Vec<u8>,
-    ) -> Result<(
-        MessagesApiSubscription<'a, C::ApiClient>,
-        Vec<u8>,
-        Option<Cursor>,
-    )> {
-        let stream = context
-            .as_ref()
-            .api()
-            .subscribe_group_messages_with_cursors(&topic_cursor)
-            .await?;
-        Ok((
-            stream,
-            new_group,
-            Some(Cursor::new(1 as SequenceId, 0 as OriginatorId)),
-        ))
-    }
-}
-
 impl<'a, C, Factory> Stream
     for StreamGroupMessages<'a, C, MessagesApiSubscription<'a, C::ApiClient>, Factory>
 where
@@ -320,8 +124,8 @@ where
             Waiting => {
                 tracing::trace!("stream messages in waiting state");
                 let this = self.as_mut().project();
-                if let Some(group) = this.add_queue.pop_front() {
-                    self.as_mut().resolve_group_additions(group);
+                if let Some((group, cursor)) = this.add_queue.pop_front() {
+                    self.as_mut().resolve_group_additions(group, cursor);
                     cx.waker().wake_by_ref();
                     return Poll::Pending;
                 }
@@ -456,16 +260,29 @@ where
         Poll::Pending
     }
 
+    pub(super) fn add_with_cursor(
+        mut self: Pin<&mut Self>,
+        group: MlsGroup<C>,
+        cursor: Option<GlobalCursor>,
+    ) {
+        self.as_mut().project().add_queue.push_back((group, cursor));
+    }
+
     /// Add the group to the group list
     /// and transition the stream to Adding state
-    fn resolve_group_additions(mut self: Pin<&mut Self>, group: MlsGroup<C>) {
+    fn resolve_group_additions(
+        mut self: Pin<&mut Self>,
+        group: MlsGroup<C>,
+        cursor: Option<GlobalCursor>,
+    ) {
         tracing::debug!(
             "begin establishing new message stream to include group_id={}",
             hex::encode(&group.group_id)
         );
         let this = self.as_mut().project();
         if !this.groups.contains(&group.group_id) {
-            this.groups.add(&group.group_id, GlobalCursor::default());
+            let position = cursor.unwrap_or_default();
+            this.groups.add(&group.group_id, position);
         }
         let groups_with_positions = self.groups.groups_with_positions().clone();
         let future = Self::subscribe(self.context.clone(), groups_with_positions, group.group_id);
@@ -586,48 +403,5 @@ where
     fn set_cursor(mut self: Pin<&mut Self>, group_id: &[u8], new_cursor: Cursor) {
         let this = self.as_mut().project();
         this.groups.set(group_id, new_cursor);
-    }
-}
-
-#[cfg(test)]
-pub mod tests {
-    use crate::assert_msg;
-    use crate::groups::send_message_opts::SendMessageOpts;
-    use crate::tester;
-    use futures::stream::StreamExt;
-    use rstest::*;
-
-    #[xmtp_common::timeout(std::time::Duration::from_secs(30))]
-    #[rstest]
-    #[xmtp_common::test]
-    #[cfg_attr(target_arch = "wasm32", ignore)]
-    async fn test_stream_messages() {
-        tester!(alice, with_name: "alice");
-        tester!(bob, with_name: "bob");
-
-        let alice_group = alice.create_group(None, None).unwrap();
-        tracing::info!("Group Id = [{}]", hex::encode(&alice_group.group_id));
-
-        alice_group.add_members(&[bob.inbox_id()]).await.unwrap();
-        let bob_groups = bob.sync_welcomes().await.unwrap();
-        let bob_group = bob_groups.first().unwrap();
-        alice_group.sync().await.unwrap();
-
-        let stream = alice_group.stream().await.unwrap();
-        futures::pin_mut!(stream);
-        bob_group
-            .send_message(b"hello", SendMessageOpts::default())
-            .await
-            .unwrap();
-
-        // group updated msg/bob is added
-        // assert_msg_exists!(stream);
-        assert_msg!(stream, "hello");
-
-        bob_group
-            .send_message(b"hello2", SendMessageOpts::default())
-            .await
-            .unwrap();
-        assert_msg!(stream, "hello2");
     }
 }
