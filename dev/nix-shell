@@ -1,4 +1,32 @@
 #!/usr/bin/env bash
+set -euo pipefail
+
+find_nix() {
+  if command -v nix >/dev/null 2>&1; then
+    command -v nix
+    return
+  fi
+
+  local candidate
+  for candidate in \
+    "$HOME/.nix-profile/bin/nix" \
+    "/nix/var/nix/profiles/default/bin/nix"
+  do
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+
+  echo "nix not found on PATH or in standard profile locations" >&2
+  return 127
+}
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-exec nix develop "${REPO_ROOT}#${NIX_DEVSHELL:-default}" --command bash -euc "$1"
+NIX_BIN="$(find_nix)"
+exec "$NIX_BIN" develop "${REPO_ROOT}#${NIX_DEVSHELL:-default}" \
+  --command env "LIBXMTP_NIX_BIN=$NIX_BIN" bash -euc '
+    export PATH="$(dirname "$LIBXMTP_NIX_BIN"):$PATH"
+    export NIX_BIN="$LIBXMTP_NIX_BIN"
+    eval "$1"
+  ' bash "$1"

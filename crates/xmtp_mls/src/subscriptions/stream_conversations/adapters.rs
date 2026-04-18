@@ -98,10 +98,8 @@ impl Stream for BroadcastGroupStream {
                             if *this.include_preference_groups =>
                         {
                             let replay_after_ns = event.conversation_replay_after_ns;
-                            let mut groups = event
-                                .conversation_cursors
-                                .into_iter()
-                                .map(|(group, attach_cursor)| WelcomeOrGroup::Group {
+                            let mut groups = event.conversation_cursors.into_iter().map(
+                                |(group, attach_cursor)| WelcomeOrGroup::Group {
                                     replay_after_ns: replay_after_ns
                                         .get(group.as_slice())
                                         .cloned()
@@ -109,7 +107,8 @@ impl Stream for BroadcastGroupStream {
                                     id: group,
                                     catch_up_before_stream: true,
                                     attach_cursor,
-                                });
+                                },
+                            );
 
                             if let Some(group) = groups.next() {
                                 this.pending_events.extend(groups);

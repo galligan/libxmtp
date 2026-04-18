@@ -59,7 +59,7 @@ where
         Ok(self
             .db()
             .find_group_intents(
-                group_id.to_vec(),
+                group_id,
                 Some(vec![IntentState::ToPublish, IntentState::Published]),
                 None,
             )?

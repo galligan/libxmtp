@@ -35,7 +35,10 @@ async fn test_disappearing_message_update_message_in_group() {
 
     let msgs = alix_bo_dm.find_messages_v2(&Default::default())?;
     assert_eq!(msgs.len(), 4);
-    assert_eq!(alix_bo_dm.disappearing_settings()?.unwrap(), expected_settings);
+    assert_eq!(
+        alix_bo_dm.disappearing_settings()?.unwrap(),
+        expected_settings
+    );
 
     let primary_update_ids_after_first_sync = group_update_ids(&alix_bo_dm);
     assert_eq!(primary_update_ids_after_first_sync.len(), 4);
@@ -50,9 +53,18 @@ async fn test_disappearing_message_update_message_in_group() {
     // transcript-visible GroupUpdated state instead of reapplying or duplicating it.
     alix.sync_all_welcomes_and_groups(None).await?;
 
-    assert_eq!(alix_bo_dm.disappearing_settings()?.unwrap(), expected_settings);
-    assert_eq!(alix_bo_alix_dm.find_messages_v2(&Default::default())?.len(), 4);
-    assert_eq!(group_update_ids(&alix_bo_dm), primary_update_ids_after_first_sync);
+    assert_eq!(
+        alix_bo_dm.disappearing_settings()?.unwrap(),
+        expected_settings
+    );
+    assert_eq!(
+        alix_bo_alix_dm.find_messages_v2(&Default::default())?.len(),
+        4
+    );
+    assert_eq!(
+        group_update_ids(&alix_bo_dm),
+        primary_update_ids_after_first_sync
+    );
     assert_eq!(
         group_update_ids(&alix_bo_alix_dm),
         stitched_update_ids_after_first_sync

@@ -13,8 +13,8 @@ use xmtp_api_d14n::MessageBackendBuilder;
 use xmtp_db::{EncryptedMessageStore, StorageOption, WasmDb};
 use xmtp_id::associations::Identifier as XmtpIdentifier;
 use xmtp_mls::{
-  Client as MlsClient, DeviceSyncMode as XmtpDeviceSyncMode, GroupSyncSummary as XmtpGroupSyncSummary,
-  IdentityStrategy, MlsGroup, Quorum, SqliteCursorStore,
+  Client as MlsClient, DeviceSyncMode as XmtpDeviceSyncMode,
+  GroupSyncSummary as XmtpGroupSyncSummary, IdentityStrategy, MlsGroup, Quorum, SqliteCursorStore,
   VisibilityConfirmationOptions as XmtpVisibilityConfirmationOptions,
 };
 use xmtp_proto::api_client::AggregateStats;

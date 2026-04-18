@@ -6,10 +6,10 @@ use openmls::{
 };
 use prost::Message;
 use tls_codec::{Deserialize, Serialize};
-use xmtp_db::XmtpMlsStorageProvider;
-use xmtp_db::XmtpOpenMlsProviderRef;
 use xmtp_api::{ApiClientWrapper, XmtpApi};
 use xmtp_api_d14n::protocol::XmtpQuery;
+use xmtp_db::XmtpMlsStorageProvider;
+use xmtp_db::XmtpOpenMlsProviderRef;
 
 use crate::{
     client::ClientError,

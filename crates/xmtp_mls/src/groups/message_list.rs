@@ -1,9 +1,12 @@
 use crate::context::XmtpSharedContext;
-use crate::groups::MlsGroup;
+use crate::groups::{GroupError, MlsGroup};
 use crate::messages::decoded_message::DecodedMessage;
 use crate::messages::enrichment::{EnrichMessageError, enrich_messages};
 use xmtp_db::DbQuery;
-use xmtp_db::group_message::{ContentType as DbContentType, MsgQueryArgs};
+use xmtp_db::group_message::{
+    ContentType, ContentType as DbContentType, LatestMessageTimeBySender, MsgQueryArgs,
+    StoredGroupMessage, StoredGroupMessageWithReactions,
+};
 use xmtp_db::prelude::QueryGroupMessage;
 
 impl<Context> MlsGroup<Context>
@@ -32,6 +35,106 @@ where
         )?;
 
         enrich_messages(conn, &self.group_id, initial_messages)
+    }
+
+    /// Query the database for stored messages. Optionally filtered by time, kind,
+    /// delivery status, and limit.
+    pub fn find_messages(
+        &self,
+        args: &MsgQueryArgs,
+    ) -> Result<Vec<StoredGroupMessage>, GroupError> {
+        let conn = self.context.db();
+        self.find_messages_with_conn(args, conn)
+    }
+
+    pub fn find_messages_with_conn<C>(
+        &self,
+        args: &MsgQueryArgs,
+        conn: C,
+    ) -> Result<Vec<StoredGroupMessage>, GroupError>
+    where
+        C: QueryGroupMessage,
+    {
+        let messages = conn.get_group_messages(&self.group_id, args)?;
+        Ok(messages)
+    }
+
+    /// Count the number of stored messages matching the given criteria.
+    pub fn count_messages(&self, args: &MsgQueryArgs) -> Result<i64, GroupError> {
+        let conn = self.context.db();
+        self.count_messages_with_conn(args, conn)
+    }
+
+    pub fn count_messages_with_conn<C>(
+        &self,
+        args: &MsgQueryArgs,
+        conn: C,
+    ) -> Result<i64, GroupError>
+    where
+        C: QueryGroupMessage,
+    {
+        let count = conn.count_group_messages(&self.group_id, args)?;
+        Ok(count)
+    }
+
+    /// Query the database for stored messages with reactions attached.
+    pub fn find_messages_with_reactions(
+        &self,
+        args: &MsgQueryArgs,
+    ) -> Result<Vec<StoredGroupMessageWithReactions>, GroupError> {
+        let conn = self.context.db();
+        self.find_messages_with_reactions_with_conn(args, conn)
+    }
+
+    pub fn find_messages_with_reactions_with_conn<C>(
+        &self,
+        args: &MsgQueryArgs,
+        conn: C,
+    ) -> Result<Vec<StoredGroupMessageWithReactions>, GroupError>
+    where
+        C: QueryGroupMessage,
+    {
+        let messages = conn.get_group_messages_with_reactions(&self.group_id, args)?;
+        Ok(messages)
+    }
+
+    /// Query for enriched messages (with reactions, replies, and deletion status).
+    pub fn find_enriched_messages(
+        &self,
+        args: &MsgQueryArgs,
+    ) -> Result<Vec<DecodedMessage>, EnrichMessageError> {
+        let conn = self.context.db();
+        self.find_enriched_messages_with_conn(args, conn)
+    }
+
+    pub fn find_enriched_messages_with_conn<C>(
+        &self,
+        args: &MsgQueryArgs,
+        conn: C,
+    ) -> Result<Vec<DecodedMessage>, EnrichMessageError>
+    where
+        C: QueryGroupMessage + DbQuery,
+    {
+        let messages = conn.get_group_messages(&self.group_id, args)?;
+        let enriched = enrich_messages(conn, &self.group_id, messages)?;
+        Ok(enriched)
+    }
+
+    pub fn get_last_read_times(&self) -> Result<LatestMessageTimeBySender, GroupError> {
+        let conn = self.context.db();
+        self.get_last_read_times_with_conn(conn)
+    }
+
+    pub fn get_last_read_times_with_conn<C>(
+        &self,
+        conn: C,
+    ) -> Result<LatestMessageTimeBySender, GroupError>
+    where
+        C: QueryGroupMessage,
+    {
+        let latest_read_receipt =
+            conn.get_latest_message_times_by_sender(&self.group_id, &[ContentType::ReadReceipt])?;
+        Ok(latest_read_receipt)
     }
 }
 

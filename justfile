@@ -51,18 +51,16 @@ lint-toml:
 lint-nix:
   nixfmt --check nix/ flake.nix
 
-[script("bash")]
 lint-treefmt:
-  nix fmt -- --fail-on-change
+  "${NIX_BIN:-nix}" fmt -- --fail-on-change
 
 lint-markdown:
   markdownlint "**/*.md" --disable MD001 MD013
 
 # --- FORMAT ---
 
-[script("bash")]
 format:
-  nix fmt
+  "${NIX_BIN:-nix}" fmt
   just android format
   just ios format
   just node format
@@ -110,7 +108,7 @@ backend command="up":
 [script("bash")]
 _backend-up:
   set -euo pipefail
-  nix build .#validation-service-image
+  "${NIX_BIN:-nix}" build .#validation-service-image
   dev/docker/up
 
 [private]

@@ -368,10 +368,9 @@ where
 
         Ok(initial_state.diff(&final_state))
     }
-
 }
 
-impl<'a, Context> IdentityUpdates<Context>
+impl<Context> IdentityUpdates<Context>
 where
     Context: IdentityUpdateContext,
 {
@@ -554,7 +553,7 @@ where
     }
 }
 
-impl<'a, Context> IdentityUpdates<Context>
+impl<Context> IdentityUpdates<Context>
 where
     Context: IdentityStateContext,
 {

@@ -65,7 +65,7 @@ test-ci:
 test-integration: _build-test install
     set -euo pipefail
     cd {{ source_directory() }}
-    nix develop .#js --command bash -euc 'yarn tsc --noEmit && yarn vitest run'
+    "${NIX_BIN:-nix}" develop .#js --command bash -euc 'yarn tsc --noEmit && yarn vitest run'
 
 # Build WASM bindings
 build:

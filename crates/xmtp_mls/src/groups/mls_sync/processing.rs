@@ -5,6 +5,29 @@ use crate::identity_updates::IdentityStateContext;
 use openmls::prelude::ApplicationMessage;
 use xmtp_proto::types::{Cursor, InstallationId};
 
+struct IntentValidationLogContext<'a> {
+    local_inbox_id: InboxIdRef<'a>,
+    local_installation_id: &'a InstallationId,
+    group_id: &'a [u8],
+    cursor: &'a Cursor,
+    envelope_timestamp_ns: i64,
+}
+
+struct OwnMessageTransaction<'a> {
+    validation_result: Result<Option<(StagedCommit, ValidatedCommit)>, IntentResolutionError>,
+    identifier: &'a mut MessageIdentifierBuilder,
+    envelope: &'a GroupMessage,
+    allow_cursor_increment: bool,
+}
+
+struct ExternalMessageTransaction<'a> {
+    envelope: &'a GroupMessage,
+    allow_cursor_increment: bool,
+    validated_commit: Option<ValidatedCommit>,
+    identifier: &'a mut MessageIdentifierBuilder,
+    deferred_events: &'a mut DeferredEvents,
+}
+
 async fn validate_staged_commit<Context>(
     context: &Context,
     staged_commit: &StagedCommit,
@@ -45,23 +68,19 @@ fn validate_external_proposal_message(
 
 async fn validate_staged_commit_for_intent<Context>(
     context: &Context,
-    local_inbox_id: InboxIdRef<'_>,
-    local_installation_id: InstallationId,
-    group_id: &[u8],
-    cursor: &Cursor,
     intent: &StoredGroupIntent,
     staged_commit: &StagedCommit,
     mls_group: &OpenMlsGroup,
-    envelope_timestamp_ns: i64,
+    log_context: IntentValidationLogContext<'_>,
 ) -> Result<ValidatedCommit, IntentResolutionError>
 where
     Context: CommitValidationContext + Clone,
 {
     tracing::info!(
         "[{}] Validating commit for intent {}. Message timestamp: ({})",
-        local_inbox_id,
+        log_context.local_inbox_id,
         intent.id,
-        envelope_timestamp_ns,
+        log_context.envelope_timestamp_ns,
     );
 
     let maybe_validated_commit = validate_staged_commit(context, staged_commit, mls_group).await;
@@ -69,10 +88,10 @@ where
     match maybe_validated_commit {
         Err(err) => {
             tracing::error!(
-                inbox_id = local_inbox_id,
-                installation_id = %local_installation_id,
-                group_id = hex::encode(group_id),
-                cursor = %cursor,
+                inbox_id = log_context.local_inbox_id,
+                installation_id = %log_context.local_installation_id,
+                group_id = hex::encode(log_context.group_id),
+                cursor = %log_context.cursor,
                 intent.id,
                 intent.kind = %intent.kind,
                 "Error validating commit for own message. Intent ID [{}]: {err:?}",
@@ -199,14 +218,17 @@ where
         provider: &Provider,
         mls_group: &mut OpenMlsGroup,
         intent: &StoredGroupIntent,
-        validation_result: Result<Option<(StagedCommit, ValidatedCommit)>, IntentResolutionError>,
-        identifier: &mut MessageIdentifierBuilder,
-        envelope: &GroupMessage,
-        allow_cursor_increment: bool,
+        txn: OwnMessageTransaction<'_>,
     ) -> Result<(), GroupMessageProcessingError>
     where
         Provider: MlsProviderExt,
     {
+        let OwnMessageTransaction {
+            validation_result,
+            identifier,
+            envelope,
+            allow_cursor_increment,
+        } = txn;
         let storage = provider.key_store();
         let cursor = envelope.cursor;
         let intent_id = intent.id;
@@ -257,15 +279,18 @@ where
         &self,
         provider: &Provider,
         mls_group: &mut OpenMlsGroup,
-        envelope: &GroupMessage,
-        allow_cursor_increment: bool,
-        validated_commit: Option<ValidatedCommit>,
-        identifier: &mut MessageIdentifierBuilder,
-        deferred_events: &mut DeferredEvents,
+        txn: ExternalMessageTransaction<'_>,
     ) -> Result<MessageIdentifier, GroupMessageProcessingError>
     where
         Provider: MlsProviderExt,
     {
+        let ExternalMessageTransaction {
+            envelope,
+            allow_cursor_increment,
+            validated_commit,
+            identifier,
+            deferred_events,
+        } = txn;
         let storage = provider.key_store();
         let db = storage.db();
         let GroupMessage {
@@ -481,10 +506,12 @@ where
                         &provider,
                         mls_group,
                         &intent,
-                        validation_result,
-                        &mut identifier,
-                        envelope,
-                        allow_cursor_increment,
+                        OwnMessageTransaction {
+                            validation_result,
+                            identifier: &mut identifier,
+                            envelope,
+                            allow_cursor_increment,
+                        },
                     )
                 })?;
                 identifier.build()
@@ -660,16 +687,20 @@ where
                             }
                         })?;
 
+                    let local_installation_id =
+                        IdentityStateContext::installation_id(&self.context);
                     let validated_commit = validate_staged_commit_for_intent(
                         &self.context,
-                        self.context.inbox_id(),
-                        IdentityStateContext::installation_id(&self.context),
-                        &self.group_id,
-                        cursor,
                         intent,
                         &staged_commit,
                         mls_group,
-                        envelope.timestamp(),
+                        IntentValidationLogContext {
+                            local_inbox_id: self.context.inbox_id(),
+                            local_installation_id: &local_installation_id,
+                            group_id: &self.group_id,
+                            cursor,
+                            envelope_timestamp_ns: envelope.timestamp(),
+                        },
                     )
                     .await;
                     let validated_commit = validated_commit?;
@@ -980,11 +1011,13 @@ where
             self.process_external_message_transaction(
                 &provider,
                 mls_group,
-                envelope,
-                allow_cursor_increment,
-                validated_commit.clone(),
-                &mut identifier,
-                &mut deferred_events,
+                ExternalMessageTransaction {
+                    envelope,
+                    allow_cursor_increment,
+                    validated_commit: validated_commit.clone(),
+                    identifier: &mut identifier,
+                    deferred_events: &mut deferred_events,
+                },
             )
         })?;
 

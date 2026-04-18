@@ -15,7 +15,7 @@ install-ci:
 [script("bash")]
 _prepare-dist *extra_flags="":
     set -euo pipefail
-    nix develop .#default --command bash -euc '\
+    "${NIX_BIN:-nix}" develop .#default --command bash -euc '\
       rm -rf dist && \
       yarn napi build --platform --esm {{ extra_flags }} && \
       mkdir -p dist && mv index.js dist && mv index.d.ts dist && mv *.node dist'

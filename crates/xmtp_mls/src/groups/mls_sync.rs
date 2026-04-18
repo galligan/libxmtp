@@ -144,8 +144,8 @@ mod persistence;
 mod processing;
 mod publish;
 mod receive;
-mod resolution;
 mod removals;
+mod resolution;
 #[cfg(test)]
 mod tests;
 mod types;
@@ -154,9 +154,7 @@ mod welcomes;
 pub(crate) use events::DeferredEvents;
 pub(crate) use helpers::decode_staged_commit;
 pub(super) use helpers::generate_commit_with_rollback;
-pub use types::{GroupMessageProcessingError, IntentResolutionError};
-pub(crate) use types::PublishIntentData;
-use helpers::{
-    extract_message_sender, handle_published_intent_send_failure,
-};
+use helpers::{extract_message_sender, handle_published_intent_send_failure};
 use membership::calculate_membership_changes_with_keypackages;
+pub(crate) use types::PublishIntentData;
+pub use types::{GroupMessageProcessingError, IntentResolutionError};

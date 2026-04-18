@@ -3,9 +3,9 @@
 //! from the data in DB/Api
 use std::collections::HashMap;
 
+use xmtp_api::ApiError;
 use xmtp_api::{ApiClientWrapper, XmtpApi};
 use xmtp_api_d14n::protocol::XmtpQuery;
-use xmtp_api::ApiError;
 use xmtp_common::RetryableError;
 use xmtp_db::{
     Fetch, NotFound, XmtpOpenMlsProvider,
@@ -13,11 +13,7 @@ use xmtp_db::{
 };
 use xmtp_proto::types::{GroupMessage, WelcomeMessage};
 
-use crate::{
-    context::XmtpSharedContext,
-    groups::MlsGroup,
-    identity_updates::IdentityStateContext,
-};
+use crate::{context::XmtpSharedContext, groups::MlsGroup, identity_updates::IdentityStateContext};
 use xmtp_id::key_package::{KeyPackageVerificationError, VerifiedKeyPackageV2};
 
 use thiserror::Error;
