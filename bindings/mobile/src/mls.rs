@@ -1752,6 +1752,11 @@ impl FfiConversations {
         FfiStreamCloser::new(handle)
     }
 
+    /// Subscribe to all conversations visible to the current installation.
+    ///
+    /// This stream bootstraps conversations from welcomes and local events, so
+    /// callbacks may represent either newly discovered groups or already-known
+    /// groups that needed catch-up before becoming streamable.
     pub async fn stream(&self, callback: Arc<dyn FfiConversationCallback>) -> FfiStreamCloser {
         let client = self.inner_client.clone();
         let close_cb = callback.clone();
@@ -1810,6 +1815,8 @@ impl FfiConversations {
         conversation_type: Option<FfiConversationType>,
         consent_states: Option<Vec<FfiConsentState>>,
     ) -> FfiStreamCloser {
+        // The mobile surface intentionally delegates filtering to Rust so iOS
+        // and Android get the same replay/bootstrap semantics as Node and WASM.
         let consents: Option<Vec<ConsentState>> =
             consent_states.map(|states| states.into_iter().map(|state| state.into()).collect());
         let close_cb = message_callback.clone();

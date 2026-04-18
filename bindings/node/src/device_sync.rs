@@ -1,3 +1,9 @@
+//! Node-facing device-sync and archive APIs.
+//!
+//! This module keeps the napi surface aligned with the core Rust device-sync
+//! client while translating archive metadata and binary keys into JS-friendly
+//! types.
+
 use crate::conversations::GroupSyncSummary;
 use crate::{ErrorWrapper, client::RustXmtpClient};
 use napi::bindgen_prelude::{BigInt, Result, Uint8Array};
@@ -151,6 +157,7 @@ pub struct DeviceSync {
 
 #[napi]
 impl DeviceSync {
+  /// Creates the Node facade over the shared Rust device-sync client.
   pub fn new(inner_client: Arc<RustXmtpClient>) -> Self {
     Self { inner_client }
   }
@@ -187,7 +194,7 @@ impl DeviceSync {
   }
 
   /// Manually process a sync archive that matches the pin given.
-  /// If no pin is given, then it will process the last archive sent.
+  /// If no pin is given, the most recently seen archive is used.
   #[napi]
   pub async fn process_sync_archive(&self, archive_pin: Option<String>) -> Result<()> {
     self

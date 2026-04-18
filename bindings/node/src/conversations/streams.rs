@@ -12,6 +12,10 @@ use xmtp_db::consent_record::ConsentState as XmtpConsentState;
 use xmtp_mls::worker::device_sync::PreferenceUpdate as XmtpUserPreferenceUpdate;
 
 #[napi(discriminant = "type")]
+/// Streamed preference updates exposed to Node callers.
+///
+/// This enum mirrors the subset of preference updates that are currently meant
+/// to be stable across the JS boundary.
 pub enum UserPreferenceUpdate {
   ConsentUpdate { consent: Consent },
   HmacKeyUpdate { key: Uint8Array },
@@ -30,6 +34,10 @@ impl From<XmtpUserPreferenceUpdate> for UserPreferenceUpdate {
 
 #[napi]
 impl Conversations {
+  /// Subscribe to conversation bootstrap events for the current client.
+  ///
+  /// The callback receives usable `Conversation` values after the Rust core has
+  /// handled welcome processing and any required catch-up work.
   #[napi]
   pub async fn stream(
     &self,
@@ -59,6 +67,10 @@ impl Conversations {
     Ok(StreamCloser::new(stream_closer))
   }
 
+  /// Subscribe to all replayable group messages that match the optional filters.
+  ///
+  /// Stream errors are intentionally swallowed after logging so a single bad
+  /// payload does not tear down the long-lived JS subscription.
   #[napi]
   pub async fn stream_all_messages(
     &self,
@@ -134,6 +146,7 @@ impl Conversations {
     Ok(StreamCloser::new(stream_closer))
   }
 
+  /// Subscribe to consent changes from both local actions and synced device updates.
   #[napi]
   pub async fn stream_consent(
     &self,
@@ -169,6 +182,7 @@ impl Conversations {
     Ok(StreamCloser::new(stream_closer))
   }
 
+  /// Subscribe to user preference changes that are replicated through device sync.
   #[napi]
   pub async fn stream_preferences(
     &self,
@@ -208,6 +222,7 @@ impl Conversations {
     Ok(StreamCloser::new(stream_closer))
   }
 
+  /// Subscribe to message deletions emitted by the disappearing-messages worker.
   #[napi]
   pub async fn stream_message_deletions(
     &self,

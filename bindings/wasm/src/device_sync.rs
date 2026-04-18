@@ -1,3 +1,9 @@
+//! WASM-facing device-sync and archive APIs.
+//!
+//! Browser callers cannot use the file-based archive helpers from the native
+//! bindings, so this module exposes the same logical operations in byte-oriented
+//! form while keeping option and metadata types aligned with the other bindings.
+
 use crate::ErrorWrapper;
 use crate::client::{GroupSyncSummary, RustXmtpClient};
 use bindings_wasm_macros::wasm_bindgen_numbered_enum;
@@ -169,6 +175,7 @@ pub struct DeviceSync {
 }
 
 impl DeviceSync {
+  /// Creates the WASM facade over the shared Rust device-sync client.
   pub fn new(inner_client: Arc<RustXmtpClient>) -> Self {
     Self { inner_client }
   }
@@ -242,6 +249,10 @@ impl DeviceSync {
   }
 
   /// Export archive data to bytes for later restoration.
+  ///
+  /// Unlike the native bindings, the WASM surface stays in-memory so browser
+  /// callers can decide whether to persist the bytes to IndexedDB, OPFS, or
+  /// another application-managed store.
   #[wasm_bindgen(js_name = createArchive)]
   pub async fn create_archive(
     &self,

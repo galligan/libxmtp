@@ -1,3 +1,9 @@
+//! Mobile FFI entrypoint for libxmtp.
+//!
+//! This crate intentionally keeps the binding surface thin: exported UniFFI
+//! types translate platform-facing inputs and outputs into the Rust core while
+//! preserving machine-readable error codes for iOS and Android callers.
+
 #![recursion_limit = "256"]
 #![warn(clippy::unwrap_used)]
 pub mod crypto;
@@ -142,8 +148,10 @@ impl From<uniffi::UnexpectedUniFFICallbackError> for GenericError {
 }
 
 /// Wrapper that formats errors as `[error_code] message` for mobile SDKs.
-/// UniFFI uses Display to convert errors to strings, so this wrapper
-/// ensures mobile clients receive machine-readable error codes.
+///
+/// UniFFI turns Rust errors into strings via `Display`, so this wrapper is the
+/// compatibility boundary that preserves machine-readable error codes without
+/// exposing the full Rust error type hierarchy to Swift/Kotlin.
 #[derive(Debug, uniffi::Error)]
 #[uniffi(flat_error)]
 pub enum FfiError {

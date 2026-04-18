@@ -1,4 +1,8 @@
-//! This crate only compiles for webassembly
+//! WebAssembly entrypoint for libxmtp.
+//!
+//! The WASM bindings expose the same core client, stream, and device-sync
+//! concepts as the native bindings, but adapted to browser-compatible types such
+//! as `ReadableStream`, `JsError`, and `Uint8Array`.
 #![recursion_limit = "256"]
 
 xmtp_common::if_wasm! {
