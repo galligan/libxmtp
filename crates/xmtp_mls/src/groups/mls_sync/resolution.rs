@@ -1,44 +1,137 @@
 use super::*;
+use xmtp_common::{MaybeSend, MaybeSync};
+use xmtp_db::StorageError;
+
+pub(super) trait PauseResolutionContext: MaybeSend + MaybeSync {
+    fn paused_group_version(&self, group_id: &[u8]) -> Result<Option<String>, GroupError>;
+    fn unpause_group(&self, group_id: &[u8]) -> Result<(), GroupError>;
+    fn current_pkg_version(&self) -> &str;
+}
+
+#[derive(Debug)]
+pub(super) enum IntentResolutionStatus {
+    Processed,
+    Deleted,
+    Error {
+        kind: IntentKind,
+    },
+    Pending {
+        state: IntentState,
+        kind: IntentKind,
+    },
+}
+
+pub(super) trait IntentResolutionQueryContext: MaybeSend + MaybeSync {
+    fn latest_resolvable_intent_id(&self, group_id: &[u8]) -> Result<Option<ID>, StorageError>;
+    fn intent_resolution_status(
+        &self,
+        intent_id: &ID,
+    ) -> Result<IntentResolutionStatus, StorageError>;
+}
+
+impl<Context> PauseResolutionContext for Context
+where
+    Context: XmtpSharedContext,
+{
+    fn paused_group_version(&self, group_id: &[u8]) -> Result<Option<String>, GroupError> {
+        Ok(self.db().get_group_paused_version(group_id)?)
+    }
+
+    fn unpause_group(&self, group_id: &[u8]) -> Result<(), GroupError> {
+        Ok(self.db().unpause_group(group_id)?)
+    }
+
+    fn current_pkg_version(&self) -> &str {
+        self.version_info().pkg_version()
+    }
+}
+
+impl<Context> IntentResolutionQueryContext for Context
+where
+    Context: XmtpSharedContext,
+{
+    fn latest_resolvable_intent_id(&self, group_id: &[u8]) -> Result<Option<ID>, StorageError> {
+        Ok(self
+            .db()
+            .find_group_intents(
+                group_id.to_vec(),
+                Some(vec![IntentState::ToPublish, IntentState::Published]),
+                None,
+            )?
+            .last()
+            .map(|intent| intent.id))
+    }
+
+    fn intent_resolution_status(
+        &self,
+        intent_id: &ID,
+    ) -> Result<IntentResolutionStatus, StorageError> {
+        Ok(
+            match Fetch::<StoredGroupIntent>::fetch(&self.db(), intent_id)? {
+                Some(StoredGroupIntent {
+                    state: IntentState::Processed,
+                    ..
+                }) => IntentResolutionStatus::Processed,
+                Some(StoredGroupIntent {
+                    state: IntentState::Error,
+                    kind,
+                    ..
+                }) => IntentResolutionStatus::Error { kind },
+                Some(StoredGroupIntent { state, kind, .. }) => {
+                    IntentResolutionStatus::Pending { state, kind }
+                }
+                None => IntentResolutionStatus::Deleted,
+            },
+        )
+    }
+}
+
+pub(super) fn resolve_paused_group<Context>(
+    context: &Context,
+    group_id: &[u8],
+) -> Result<(), GroupError>
+where
+    Context: PauseResolutionContext,
+{
+    if let Some(required_min_version_str) = context.paused_group_version(group_id)? {
+        tracing::info!(
+            "Group is paused until version: {}",
+            required_min_version_str
+        );
+        let current_version_str = context.current_pkg_version();
+        let current_version = LibXMTPVersion::parse(current_version_str)?;
+        let required_min_version = LibXMTPVersion::parse(&required_min_version_str)?;
+
+        if required_min_version <= current_version {
+            tracing::info!(
+                "Unpausing group since version requirements are met. \
+                 Group ID: {}",
+                hex::encode(group_id),
+            );
+            context.unpause_group(group_id)?;
+        } else {
+            tracing::warn!(
+                "Skipping sync for paused group since version requirements are not met. \
+                Group ID: {}, \
+                Required version: {}, \
+                Current version: {}",
+                hex::encode(group_id),
+                required_min_version_str,
+                current_version_str
+            );
+            return Err(GroupError::GroupPausedUntilUpdate(required_min_version_str));
+        }
+    }
+
+    Ok(())
+}
 
 impl<Context> MlsGroup<Context>
 where
     Context: XmtpSharedContext,
 {
     pub(super) fn handle_group_paused(&self) -> Result<(), GroupError> {
-        // Check if group is paused and try to unpause if version requirements are met
-        if let Some(required_min_version_str) =
-            self.context.db().get_group_paused_version(&self.group_id)?
-        {
-            tracing::info!(
-                "Group is paused until version: {}",
-                required_min_version_str
-            );
-            let current_version_str = self.context.version_info().pkg_version();
-            let current_version = LibXMTPVersion::parse(current_version_str)?;
-            let required_min_version = LibXMTPVersion::parse(&required_min_version_str)?;
-
-            if required_min_version <= current_version {
-                tracing::info!(
-                    "Unpausing group since version requirements are met. \
-                     Group ID: {}",
-                    hex::encode(&self.group_id),
-                );
-                self.context.db().unpause_group(&self.group_id)?;
-            } else {
-                tracing::warn!(
-                    "Skipping sync for paused group since version requirements are not met. \
-                    Group ID: {}, \
-                    Required version: {}, \
-                    Current version: {}",
-                    hex::encode(&self.group_id),
-                    required_min_version_str,
-                    current_version_str
-                );
-                // Skip sync for paused groups
-                return Err(GroupError::GroupPausedUntilUpdate(required_min_version_str));
-            }
-        }
-        Ok(())
+        resolve_paused_group(&self.context, &self.group_id)
     }
 
     #[cfg_attr(any(test, feature = "test-utils"), tracing::instrument(level = "info", fields(who = %self.context.inbox_id()), skip_all))]
@@ -47,17 +140,11 @@ where
         tracing::instrument(level = "trace", skip_all)
     )]
     pub(crate) async fn sync_until_last_intent_resolved(&self) -> Result<SyncSummary, GroupError> {
-        let intents = self.context.db().find_group_intents(
-            self.group_id.clone(),
-            Some(vec![IntentState::ToPublish, IntentState::Published]),
-            None,
-        )?;
-
-        let Some(intent) = intents.last() else {
+        let Some(intent_id) = self.context.latest_resolvable_intent_id(&self.group_id)? else {
             return Ok(Default::default());
         };
 
-        self.sync_until_intent_resolved(intent.id).await
+        self.sync_until_intent_resolved(intent_id).await
     }
 
     /**
@@ -111,7 +198,6 @@ where
         intent_id: ID,
     ) -> Result<SyncSummary, GroupError> {
         let mut summary = SyncSummary::default();
-        let db = self.context.db();
 
         let time_spent = xmtp_common::time::Instant::now();
         let backoff = ExponentialBackoff::builder()
@@ -141,15 +227,12 @@ where
                     summary.extend(s);
                 }
             }
-            match Fetch::<StoredGroupIntent>::fetch(&db, &intent_id) {
-                Ok(Some(StoredGroupIntent {
-                    state: IntentState::Processed,
-                    ..
-                })) => {
+            match self.context.intent_resolution_status(&intent_id) {
+                Ok(IntentResolutionStatus::Processed) => {
                     // This is expected, we mark intents as processed on success.
                     return Ok(summary);
                 }
-                Ok(None) => {
+                Ok(IntentResolutionStatus::Deleted) => {
                     // This is somewhat expected, we used to delete intents on success.
                     tracing::warn!(
                         "Intent was deleted when it should have been marked as processed.\
@@ -157,12 +240,7 @@ where
                     );
                     return Ok(summary);
                 }
-
-                Ok(Some(StoredGroupIntent {
-                    state: IntentState::Error,
-                    kind,
-                    ..
-                })) => {
+                Ok(IntentResolutionStatus::Error { kind }) => {
                     log_event!(
                         Event::GroupSyncIntentErrored,
                         self.context.installation_id(),
@@ -172,7 +250,7 @@ where
                     );
                     return Err(GroupError::from(summary));
                 }
-                Ok(Some(StoredGroupIntent { state, kind, .. })) => {
+                Ok(IntentResolutionStatus::Pending { state, kind }) => {
                     log_event!(
                         Event::GroupSyncIntentRetry,
                         self.context.installation_id(),

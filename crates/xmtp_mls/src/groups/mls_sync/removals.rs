@@ -57,9 +57,7 @@ where
 
         match crate::messages::decoded_message::DecodedMessage::try_from(original_msg) {
             Ok(decoded_message) => {
-                let _ = self.context.local_events().send(
-                    crate::subscriptions::LocalEvents::MessageDeleted(Box::new(decoded_message)),
-                );
+                events::emit_message_deleted_event(&self.context, decoded_message);
             }
             Err(e) => {
                 tracing::warn!(
@@ -203,11 +201,7 @@ where
         if let Some(original_msg) = original_msg_opt {
             match crate::messages::decoded_message::DecodedMessage::try_from(original_msg) {
                 Ok(decoded_message) => {
-                    let _ = self.context.local_events().send(
-                        crate::subscriptions::LocalEvents::MessageDeleted(Box::new(
-                            decoded_message,
-                        )),
-                    );
+                    events::emit_message_deleted_event(&self.context, decoded_message);
                 }
                 Err(e) => {
                     tracing::warn!(

@@ -8,14 +8,18 @@ use prost::Message;
 use tls_codec::{Deserialize, Serialize};
 use xmtp_db::XmtpMlsStorageProvider;
 use xmtp_db::XmtpOpenMlsProviderRef;
+use xmtp_api::{ApiClientWrapper, XmtpApi};
+use xmtp_api_d14n::protocol::XmtpQuery;
 
 use crate::{
     client::ClientError,
+    context::XmtpSharedContext,
     groups::{
         GroupError,
         mls_ext::{unwrap_welcome, unwrap_welcome_symmetric},
     },
     identity::parse_credential,
+    worker::tasks::TaskWorkerChannels,
 };
 use xmtp_configuration::MAX_PAST_EPOCHS;
 use xmtp_db::{
@@ -36,6 +40,45 @@ pub(crate) struct DecryptedWelcome {
     pub(crate) added_by_inbox_id: String,
     pub(crate) added_by_installation_id: Vec<u8>,
     pub(crate) welcome_metadata: Option<WelcomeMetadata>,
+}
+
+pub(crate) trait WelcomePointerContext {
+    type ApiClient: XmtpApi + XmtpQuery;
+
+    fn api(&self) -> &ApiClientWrapper<Self::ApiClient>;
+}
+
+pub(crate) trait WelcomeDecryptContext: WelcomePointerContext {
+    type MlsStorage: XmtpMlsStorageProvider;
+
+    fn mls_storage(&self) -> &Self::MlsStorage;
+    fn task_channels(&self) -> &TaskWorkerChannels;
+}
+
+impl<Context> WelcomePointerContext for Context
+where
+    Context: XmtpSharedContext,
+{
+    type ApiClient = Context::ApiClient;
+
+    fn api(&self) -> &ApiClientWrapper<Self::ApiClient> {
+        XmtpSharedContext::api(self)
+    }
+}
+
+impl<Context> WelcomeDecryptContext for Context
+where
+    Context: XmtpSharedContext,
+{
+    type MlsStorage = Context::MlsStorage;
+
+    fn mls_storage(&self) -> &Self::MlsStorage {
+        XmtpSharedContext::mls_storage(self)
+    }
+
+    fn task_channels(&self) -> &TaskWorkerChannels {
+        XmtpSharedContext::task_channels(self)
+    }
 }
 
 impl DecryptedWelcome {
@@ -78,7 +121,7 @@ impl DecryptedWelcome {
     }
     async fn welcome_from_decrypted_welcome_pointer(
         decrypted_welcome_pointer: &DecryptedWelcomePointer,
-        context: &impl crate::context::XmtpSharedContext,
+        context: &impl WelcomePointerContext,
     ) -> Result<Option<(openmls::messages::Welcome, Option<WelcomeMetadata>)>, GroupError> {
         let Some(v1) = super::super::welcome_pointer::resolve_welcome_pointer(
             decrypted_welcome_pointer,
@@ -126,7 +169,7 @@ impl DecryptedWelcome {
     }
     pub(crate) async fn from_welcome_proto(
         welcome: &WelcomeMessage,
-        context: &impl crate::context::XmtpSharedContext,
+        context: &impl WelcomeDecryptContext,
     ) -> Result<Self, GroupError> {
         use xmtp_common::r#const::{NS_IN_DAY, NS_IN_HOUR, NS_IN_MIN};
         let mls_storage = context.mls_storage();

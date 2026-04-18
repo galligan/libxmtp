@@ -1,4 +1,90 @@
 use super::*;
+use crate::groups::check_proposals_enabled;
+use crate::groups::validated_commit::CommitValidationContext;
+use crate::identity_updates::IdentityStateContext;
+use xmtp_proto::types::{Cursor, InstallationId};
+
+async fn validate_staged_commit<Context>(
+    context: &Context,
+    staged_commit: &StagedCommit,
+    mls_group: &OpenMlsGroup,
+) -> Result<ValidatedCommit, CommitValidationError>
+where
+    Context: CommitValidationContext + Clone,
+{
+    ValidatedCommit::from_staged_commit(context.clone(), staged_commit, mls_group).await
+}
+
+fn validate_external_proposal_message(
+    mls_group: &OpenMlsGroup,
+    queued_proposal: &openmls::group::QueuedProposal,
+) -> Result<(), CommitValidationError> {
+    let proposal_type = queued_proposal.proposal().proposal_type();
+    if !check_proposals_enabled(mls_group.extensions())
+        && proposal_type != ProposalType::GroupContextExtensions
+    {
+        return Err(CommitValidationError::ProposalsNotEnabled);
+    }
+
+    let extensions = mls_group.extensions();
+    let policy_set = extract_group_permissions(mls_group)?;
+    let immutable_metadata = extract_group_metadata(extensions)?;
+    let mutable_metadata = extract_group_mutable_metadata(mls_group)?;
+
+    validate_proposal(
+        queued_proposal,
+        mls_group,
+        &policy_set.policies,
+        &immutable_metadata,
+        &mutable_metadata,
+    )?;
+
+    Ok(())
+}
+
+async fn validate_staged_commit_for_intent<Context>(
+    context: &Context,
+    local_inbox_id: InboxIdRef<'_>,
+    local_installation_id: InstallationId,
+    group_id: &[u8],
+    cursor: &Cursor,
+    intent: &StoredGroupIntent,
+    staged_commit: &StagedCommit,
+    mls_group: &OpenMlsGroup,
+    envelope_timestamp_ns: i64,
+) -> Result<ValidatedCommit, IntentResolutionError>
+where
+    Context: CommitValidationContext + Clone,
+{
+    tracing::info!(
+        "[{}] Validating commit for intent {}. Message timestamp: ({})",
+        local_inbox_id,
+        intent.id,
+        envelope_timestamp_ns,
+    );
+
+    let maybe_validated_commit = validate_staged_commit(context, staged_commit, mls_group).await;
+
+    match maybe_validated_commit {
+        Err(err) => {
+            tracing::error!(
+                inbox_id = local_inbox_id,
+                installation_id = %local_installation_id,
+                group_id = hex::encode(group_id),
+                cursor = %cursor,
+                intent.id,
+                intent.kind = %intent.kind,
+                "Error validating commit for own message. Intent ID [{}]: {err:?}",
+                intent.id,
+            );
+            Err(IntentResolutionError {
+                processing_error: GroupMessageProcessingError::CommitValidation(err),
+                next_intent_state: IntentState::Error,
+            })
+        }
+        Ok(validated_commit) => Ok(validated_commit),
+    }
+}
 
 impl<Context> MlsGroup<Context>
 where
@@ -133,8 +219,9 @@ where
                     intent.kind
                 );
 
-                let validation_result =
-                    self.stage_and_validate_intent(mls_group, &intent, envelope).await;
+                let validation_result = self
+                    .stage_and_validate_intent(mls_group, &intent, envelope)
+                    .await;
 
                 // TXN-EDGE: cursor advancement + intent state transition + MLS apply/store writes - unresolved
                 self.context.mls_storage().transaction(|conn| {
@@ -413,42 +500,19 @@ where
                             }
                         })?;
 
-                    tracing::info!(
-                        "[{}] Validating commit for intent {}. Message timestamp: ({})/{}",
-                        self.context.inbox_id(),
-                        intent.id,
-                        envelope.timestamp(),
-                        envelope.created_ns
-                    );
-
-                    let maybe_validated_commit = ValidatedCommit::from_staged_commit(
+                    let validated_commit = validate_staged_commit_for_intent(
                         &self.context,
+                        self.context.inbox_id(),
+                        IdentityStateContext::installation_id(&self.context),
+                        &self.group_id,
+                        cursor,
+                        intent,
                         &staged_commit,
                         mls_group,
+                        envelope.timestamp(),
                     )
                     .await;
-
-                    let validated_commit = match maybe_validated_commit {
-                        Err(err) => {
-                            tracing::error!(
-                                inbox_id = self.context.inbox_id(),
-                                installation_id = %self.context.installation_id(),
-                                group_id = hex::encode(&self.group_id),
-                                cursor = %cursor,
-                                intent.id,
-                                intent.kind = %intent.kind,
-                                "Error validating commit for own message. Intent ID [{}]: {err:?}",
-                                intent.id,
-                            );
-                            return Err(IntentResolutionError {
-                                processing_error: GroupMessageProcessingError::CommitValidation(
-                                    err,
-                                ),
-                                next_intent_state: IntentState::Error,
-                            });
-                        }
-                        Ok(validated_commit) => validated_commit,
-                    };
+                    let validated_commit = validated_commit?;
 
                     return Ok(Some((staged_commit, validated_commit)));
                 }
@@ -682,7 +746,7 @@ where
         // and roll the transaction back, so we can fetch updates from the server before
         // being ready to process the message for a second time.
         let mut processed_message = None;
-        // TXN-EDGE: external message preflight + forced MLS reload - intentional rollback before durable apply
+        // TXN-EDGE: external message preflight + forced MLS reload - unresolved (intentional rollback before durable apply)
         let result = provider.key_store().transaction(|conn| {
             let storage = conn.key_store();
             let provider = XmtpOpenMlsProvider::new(storage);
@@ -717,9 +781,7 @@ where
 
         let validated_commit = match &processed_message.content() {
             ProcessedMessageContent::StagedCommitMessage(staged_commit) => {
-                let result =
-                    ValidatedCommit::from_staged_commit(&self.context, staged_commit, mls_group)
-                        .await;
+                let result = validate_staged_commit(&self.context, staged_commit, mls_group).await;
 
                 let validated_commit = match result {
                     Err(e) if !e.is_retryable() => {
@@ -743,61 +805,28 @@ where
                 // GCE proposals are exempt because enable_proposals() uses them to bootstrap
                 // proposal support — they must be allowed through to flip the flag on.
                 let proposal_type = queued_proposal.proposal().proposal_type();
-                if !self.proposals_enabled(mls_group)
-                    && proposal_type != ProposalType::GroupContextExtensions
-                {
-                    tracing::warn!(
-                        inbox_id = self.context.inbox_id(),
-                        group_id = hex::encode(&self.group_id),
-                        ?proposal_type,
-                        "Received proposal but proposals are not enabled on this group"
-                    );
-                    self.maybe_update_cursor(&self.context.db(), envelope)?;
-                    return Err(CommitValidationError::ProposalsNotEnabled.into());
-                }
-
-                // Validate the proposal before processing it
-                // This ensures that when we later commit pending proposals, they will succeed
-                let extensions = mls_group.extensions();
-                let policy_set = match extract_group_permissions(mls_group) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        self.maybe_update_cursor(&self.context.db(), envelope)?;
-                        return Err(CommitValidationError::from(e).into());
+                if let Err(e) = validate_external_proposal_message(mls_group, queued_proposal) {
+                    match &e {
+                        CommitValidationError::ProposalsNotEnabled => {
+                            tracing::warn!(
+                                inbox_id = self.context.inbox_id(),
+                                group_id = hex::encode(&self.group_id),
+                                ?proposal_type,
+                                "Received proposal but proposals are not enabled on this group"
+                            );
+                        }
+                        _ => {
+                            tracing::warn!(
+                                inbox_id = self.context.inbox_id(),
+                                installation_id = %self.context.installation_id(),
+                                group_id = hex::encode(&self.group_id),
+                                proposal_type = ?proposal_type,
+                                error = %e,
+                                "Received invalid proposal, rejecting"
+                            );
+                        }
                     }
-                };
-                let immutable_metadata = match extract_group_metadata(extensions) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        self.maybe_update_cursor(&self.context.db(), envelope)?;
-                        return Err(CommitValidationError::from(e).into());
-                    }
-                };
-                let mutable_metadata = match extract_group_mutable_metadata(mls_group) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        self.maybe_update_cursor(&self.context.db(), envelope)?;
-                        return Err(CommitValidationError::from(e).into());
-                    }
-                };
 
-                let validation_result = validate_proposal(
-                    queued_proposal,
-                    mls_group,
-                    &policy_set.policies,
-                    &immutable_metadata,
-                    &mutable_metadata,
-                );
-
-                if let Err(e) = validation_result {
-                    tracing::warn!(
-                        inbox_id = self.context.inbox_id(),
-                        installation_id = %self.context.installation_id(),
-                        group_id = hex::encode(&self.group_id),
-                        proposal_type = ?queued_proposal.proposal().proposal_type(),
-                        error = %e,
-                        "Received invalid proposal, rejecting"
-                    );
                     // Update cursor so we don't reprocess this invalid proposal
                     self.maybe_update_cursor(&self.context.db(), envelope)?;
                     return Err(e.into());

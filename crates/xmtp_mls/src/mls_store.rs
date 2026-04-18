@@ -3,6 +3,8 @@
 //! from the data in DB/Api
 use std::collections::HashMap;
 
+use xmtp_api::{ApiClientWrapper, XmtpApi};
+use xmtp_api_d14n::protocol::XmtpQuery;
 use xmtp_api::ApiError;
 use xmtp_common::RetryableError;
 use xmtp_db::{
@@ -11,7 +13,11 @@ use xmtp_db::{
 };
 use xmtp_proto::types::{GroupMessage, WelcomeMessage};
 
-use crate::{context::XmtpSharedContext, groups::MlsGroup};
+use crate::{
+    context::XmtpSharedContext,
+    groups::MlsGroup,
+    identity_updates::IdentityStateContext,
+};
 use xmtp_id::key_package::{KeyPackageVerificationError, VerifiedKeyPackageV2};
 
 use thiserror::Error;
@@ -45,6 +51,24 @@ pub struct MlsStore<Context> {
     context: Context,
 }
 
+#[doc(hidden)]
+pub trait SyncQueryContext {
+    type ApiClient: XmtpApi + XmtpQuery;
+
+    fn sync_api(&self) -> &ApiClientWrapper<Self::ApiClient>;
+}
+
+impl<Context> SyncQueryContext for Context
+where
+    Context: XmtpSharedContext,
+{
+    type ApiClient = Context::ApiClient;
+
+    fn sync_api(&self) -> &ApiClientWrapper<Self::ApiClient> {
+        XmtpSharedContext::sync_api(self)
+    }
+}
+
 impl<Context> MlsStore<Context> {
     pub fn new(context: Context) -> Self {
         Self { context }
@@ -53,24 +77,8 @@ impl<Context> MlsStore<Context> {
 
 impl<Context> MlsStore<Context>
 where
-    Context: XmtpSharedContext,
+    Context: SyncQueryContext,
 {
-    /// Query for welcome messages that have a `sequence_id` > than the highest cursor
-    /// found in the local database
-    pub(crate) async fn query_welcome_messages(
-        &self,
-    ) -> Result<Vec<WelcomeMessage>, MlsStoreError> {
-        let installation_id = self.context.installation_id();
-
-        let welcomes = self
-            .context
-            .api()
-            .query_welcome_messages(installation_id)
-            .await?;
-        tracing::info!("returning {} welcomes", welcomes.len());
-        Ok(welcomes)
-    }
-
     /// Query for group messages that have a `sequence_id` > than the highest cursor
     /// found in the local database
     pub(crate) async fn query_group_messages(
@@ -85,38 +93,12 @@ where
 
         Ok(messages)
     }
+}
 
-    /// Fetches the current key package from the network for each of the `installation_id`s specified
-    #[tracing::instrument(level = "trace", skip_all)]
-    pub async fn get_key_packages_for_installation_ids(
-        &self,
-        installation_ids: Vec<Vec<u8>>,
-    ) -> Result<
-        HashMap<Vec<u8>, Result<VerifiedKeyPackageV2, KeyPackageVerificationError>>,
-        MlsStoreError,
-    > {
-        let key_package_results = self
-            .context
-            .api()
-            .fetch_key_packages(installation_ids.clone())
-            .await?;
-
-        let crypto_provider = XmtpOpenMlsProvider::<()>::new_crypto();
-
-        let results: HashMap<Vec<u8>, Result<VerifiedKeyPackageV2, KeyPackageVerificationError>> =
-            key_package_results
-                .iter()
-                .map(|(id, bytes)| {
-                    (
-                        id.clone(),
-                        VerifiedKeyPackageV2::from_bytes(&crypto_provider, bytes),
-                    )
-                })
-                .collect();
-
-        Ok(results)
-    }
-
+impl<Context> MlsStore<Context>
+where
+    Context: XmtpSharedContext,
+{
     /// Query for groups with optional filters
     ///
     /// Filters:
@@ -164,5 +146,57 @@ where
             })
             .ok_or(NotFound::GroupById(group_id.clone()))
             .map_err(Into::into)
+    }
+}
+
+impl<Context> MlsStore<Context>
+where
+    Context: IdentityStateContext,
+{
+    /// Query for welcome messages that have a `sequence_id` > than the highest cursor
+    /// found in the local database
+    pub(crate) async fn query_welcome_messages(
+        &self,
+    ) -> Result<Vec<WelcomeMessage>, MlsStoreError> {
+        let installation_id = self.context.installation_id();
+
+        let welcomes = self
+            .context
+            .api()
+            .query_welcome_messages(installation_id)
+            .await?;
+        tracing::info!("returning {} welcomes", welcomes.len());
+        Ok(welcomes)
+    }
+
+    /// Fetches the current key package from the network for each of the `installation_id`s specified
+    #[tracing::instrument(level = "trace", skip_all)]
+    pub async fn get_key_packages_for_installation_ids(
+        &self,
+        installation_ids: Vec<Vec<u8>>,
+    ) -> Result<
+        HashMap<Vec<u8>, Result<VerifiedKeyPackageV2, KeyPackageVerificationError>>,
+        MlsStoreError,
+    > {
+        let key_package_results = self
+            .context
+            .api()
+            .fetch_key_packages(installation_ids.clone())
+            .await?;
+
+        let crypto_provider = XmtpOpenMlsProvider::<()>::new_crypto();
+
+        let results: HashMap<Vec<u8>, Result<VerifiedKeyPackageV2, KeyPackageVerificationError>> =
+            key_package_results
+                .iter()
+                .map(|(id, bytes)| {
+                    (
+                        id.clone(),
+                        VerifiedKeyPackageV2::from_bytes(&crypto_provider, bytes),
+                    )
+                })
+                .collect();
+
+        Ok(results)
     }
 }

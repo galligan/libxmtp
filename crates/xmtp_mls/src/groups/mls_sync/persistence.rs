@@ -1,4 +1,117 @@
 use super::*;
+use crate::groups::QueryableContentFields;
+use xmtp_common::{MaybeSend, MaybeSync};
+
+pub(super) trait ForkDetectionContext: MaybeSend + MaybeSync {
+    fn inbox_id(&self) -> InboxIdRef<'_>;
+    fn installation_id_string(&self) -> String;
+    fn mark_group_as_maybe_forked(
+        &self,
+        group_id: &[u8],
+        details: String,
+    ) -> Result<(), StorageError>;
+}
+
+pub(super) trait ReceivePostProcessContext: ForkDetectionContext {
+    fn prune_icebox(&self) -> Result<(), GroupMessageProcessingError>;
+    fn set_group_paused(
+        &self,
+        group_id: &[u8],
+        min_version: &str,
+    ) -> Result<(), GroupMessageProcessingError>;
+}
+
+impl<Context> ForkDetectionContext for Context
+where
+    Context: XmtpSharedContext,
+{
+    fn inbox_id(&self) -> InboxIdRef<'_> {
+        self.inbox_id()
+    }
+
+    fn installation_id_string(&self) -> String {
+        self.installation_id().to_string()
+    }
+
+    fn mark_group_as_maybe_forked(
+        &self,
+        group_id: &[u8],
+        details: String,
+    ) -> Result<(), StorageError> {
+        self.db().mark_group_as_maybe_forked(group_id, details)
+    }
+}
+
+impl<Context> ReceivePostProcessContext for Context
+where
+    Context: XmtpSharedContext,
+{
+    fn prune_icebox(&self) -> Result<(), GroupMessageProcessingError> {
+        self.db().prune_icebox()?;
+        Ok(())
+    }
+
+    fn set_group_paused(
+        &self,
+        group_id: &[u8],
+        min_version: &str,
+    ) -> Result<(), GroupMessageProcessingError> {
+        self.db().set_group_paused(group_id, min_version)?;
+        Ok(())
+    }
+}
+
+fn mark_probable_fork<Context>(
+    context: &Context,
+    group_id: &[u8],
+    message_cursor: u64,
+    message_epoch: GroupEpoch,
+    group_epoch: u64,
+    error: &GroupMessageProcessingError,
+) -> Result<(), GroupMessageProcessingError>
+where
+    Context: ForkDetectionContext,
+{
+    let fork_details = format!(
+        "Message cursor [{}] epoch [{}] is greater than group epoch [{}], your group may be forked",
+        message_cursor, message_epoch, group_epoch
+    );
+    tracing::error!(
+        inbox_id = context.inbox_id(),
+        installation_id = %context.installation_id_string(),
+        group_id = hex::encode(group_id),
+        original_error = error.to_string(),
+        fork_details
+    );
+    let _ = context.mark_group_as_maybe_forked(group_id, fork_details);
+    Ok(())
+}
+
+pub(super) fn prune_processed_icebox<Context>(
+    context: &Context,
+) -> Result<(), GroupMessageProcessingError>
+where
+    Context: ReceivePostProcessContext,
+{
+    context.prune_icebox()?;
+    Ok(())
+}
+
+pub(super) fn pause_group_for_protocol_version<Context>(
+    context: &Context,
+    group_id: &[u8],
+    min_version: &str,
+) -> Result<(), GroupMessageProcessingError>
+where
+    Context: ReceivePostProcessContext,
+{
+    context.set_group_paused(group_id, min_version)?;
+    tracing::warn!(
+        "Group [{}] paused due to minimum protocol version requirement",
+        hex::encode(group_id)
+    );
+    Ok(())
+}
 
 impl<Context> MlsGroup<Context>
 where
@@ -222,21 +335,14 @@ where
         );
 
         if let Err(GroupMessageProcessingError::FutureEpoch(_, _)) = &epoch_validation_result {
-            let fork_details = format!(
-                "Message cursor [{}] epoch [{}] is greater than group epoch [{}], your group may be forked",
-                message_cursor, message_epoch, group_epoch
-            );
-            tracing::error!(
-                inbox_id = self.context.inbox_id(),
-                installation_id = %self.context.installation_id(),
-                group_id = hex::encode(&self.group_id),
-                original_error = error.to_string(),
-                fork_details
-            );
-            let _ = self
-                .context
-                .db()
-                .mark_group_as_maybe_forked(&self.group_id, fork_details);
+            mark_probable_fork(
+                &self.context,
+                &self.group_id,
+                message_cursor,
+                message_epoch,
+                group_epoch,
+                error,
+            )?;
             return epoch_validation_result;
         }
 

@@ -1,10 +1,11 @@
 use super::GroupError;
+use crate::groups::mls_ext::WelcomePointerContext;
 use xmtp_common::{Retry, retry_async};
 use xmtp_proto::prelude::XmtpMlsClient;
 use xmtp_proto::types::{DecryptedWelcomePointer, WelcomeMessageType, WelcomeMessageV1};
 
 /// Returns none if the welcome pointer is not found
-pub async fn resolve_welcome_pointer<Context: crate::context::XmtpSharedContext>(
+pub(crate) async fn resolve_welcome_pointer<Context: WelcomePointerContext>(
     decrypted_welcome_pointer: &DecryptedWelcomePointer,
     context: &Context,
 ) -> Result<Option<WelcomeMessageV1>, GroupError> {

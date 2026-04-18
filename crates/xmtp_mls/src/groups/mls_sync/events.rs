@@ -1,5 +1,25 @@
 use super::*;
+use crate::messages::decoded_message::DecodedMessage;
 use std::collections::VecDeque;
+use tokio::sync::broadcast;
+
+pub(crate) trait DeferredEventContext {
+    fn worker_events(&self) -> &broadcast::Sender<SyncWorkerEvent>;
+    fn local_events(&self) -> &broadcast::Sender<LocalEvents>;
+}
+
+impl<Context> DeferredEventContext for Context
+where
+    Context: XmtpSharedContext,
+{
+    fn worker_events(&self) -> &broadcast::Sender<SyncWorkerEvent> {
+        XmtpSharedContext::worker_events(self)
+    }
+
+    fn local_events(&self) -> &broadcast::Sender<LocalEvents> {
+        XmtpSharedContext::local_events(self)
+    }
+}
 
 /// Collects events that should be sent after database transactions complete
 #[derive(Default)]
@@ -26,7 +46,7 @@ impl DeferredEvents {
     }
 
     /// Send all collected events to their respective channels
-    pub fn send_all<Context: XmtpSharedContext>(&mut self, context: &Context) {
+    pub fn send_all<Context: DeferredEventContext>(&mut self, context: &Context) {
         while let Some(event) = self.worker_events.pop_front() {
             let _ = context.worker_events().send(event);
         }
@@ -35,4 +55,23 @@ impl DeferredEvents {
             let _ = context.local_events().send(event);
         }
     }
+}
+
+pub(super) fn emit_local_event<Context>(context: &Context, event: LocalEvents)
+where
+    Context: DeferredEventContext,
+{
+    let _ = context.local_events().send(event);
+}
+
+pub(super) fn emit_message_deleted_event<Context>(
+    context: &Context,
+    decoded_message: DecodedMessage,
+) where
+    Context: DeferredEventContext,
+{
+    emit_local_event(
+        context,
+        LocalEvents::MessageDeleted(Box::new(decoded_message)),
+    );
 }

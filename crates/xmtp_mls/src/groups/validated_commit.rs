@@ -9,7 +9,10 @@ use super::{
 };
 use crate::{
     context::XmtpSharedContext,
-    identity_updates::{IdentityUpdates, InstallationDiff, InstallationDiffError},
+    identity_updates::{
+        IdentityStateContext, IdentityUpdates, InstallationDiff, InstallationDiffError,
+    },
+    utils::VersionInfo,
 };
 use openmls::{
     credentials::{BasicCredential, Credential as OpenMlsCredential, errors::BasicCredentialError},
@@ -45,6 +48,19 @@ use xmtp_proto::xmtp::{
         group_updated::{Inbox as InboxProto, MetadataFieldChange as MetadataFieldChangeProto},
     },
 };
+
+pub(crate) trait CommitValidationContext: IdentityStateContext {
+    fn version_info(&self) -> &VersionInfo;
+}
+
+impl<Context> CommitValidationContext for Context
+where
+    Context: XmtpSharedContext,
+{
+    fn version_info(&self) -> &VersionInfo {
+        XmtpSharedContext::version_info(self)
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum CommitValidationError {
@@ -316,11 +332,14 @@ pub struct ValidatedCommit {
 }
 
 impl ValidatedCommit {
-    pub async fn from_staged_commit(
-        context: &impl XmtpSharedContext,
+    pub(crate) async fn from_staged_commit<Context>(
+        context: Context,
         staged_commit: &StagedCommit,
         openmls_group: &OpenMlsGroup,
-    ) -> Result<Self, CommitValidationError> {
+    ) -> Result<Self, CommitValidationError>
+    where
+        Context: CommitValidationContext + Clone,
+    {
         let conn = context.db();
         // Get the immutable and mutable metadata
         let extensions = openmls_group.extensions();
@@ -413,7 +432,7 @@ impl ValidatedCommit {
         // group membership and the new group membership.
         // Also gets back the added and removed inbox ids from the expected diff
         let expected_diff = ExpectedDiff::from_staged_commit_with_proposers(
-            context,
+            context.clone(),
             staged_commit,
             openmls_group,
             proposals_enabled,
@@ -465,7 +484,7 @@ impl ValidatedCommit {
                 .get(&participant.inbox_id)
                 .ok_or(CommitValidationError::SubjectDoesNotExist)?;
 
-            let inbox_state = IdentityUpdates::new(&context)
+            let inbox_state = IdentityUpdates::new(context.clone())
                 .get_association_state(&conn, &participant.inbox_id, Some(*to_sequence_id as i64))
                 .await
                 .map_err(InstallationDiffError::from)?;
@@ -696,15 +715,18 @@ struct ExpectedDiff {
 }
 
 impl ExpectedDiff {
-    pub(super) async fn from_staged_commit_with_proposers(
-        context: &impl XmtpSharedContext,
+    pub(super) async fn from_staged_commit_with_proposers<Context>(
+        context: Context,
         staged_commit: &StagedCommit,
         openmls_group: &OpenMlsGroup,
         proposals_enabled: bool,
         gce_proposer: &Option<CommitParticipant>,
         added_inbox_proposers: &HashMap<String, CommitParticipant>,
         removed_inbox_proposers: &HashMap<String, CommitParticipant>,
-    ) -> Result<Self, CommitValidationError> {
+    ) -> Result<Self, CommitValidationError>
+    where
+        Context: CommitValidationContext + Clone,
+    {
         // Get the immutable and mutable metadata
         let extensions = openmls_group.extensions();
         let immutable_metadata: GroupMetadata = extensions.try_into()?;
@@ -735,8 +757,8 @@ impl ExpectedDiff {
     /// Generates an expected diff with proposer attribution for each inbox change.
     /// This is used when validating commits with proposals from multiple members.
     #[allow(clippy::too_many_arguments)]
-    async fn extract_expected_diff_with_proposers(
-        context: &impl XmtpSharedContext,
+    async fn extract_expected_diff_with_proposers<Context>(
+        context: Context,
         group_id: &[u8], // used for logging
         staged_commit: &StagedCommit,
         existing_group_extensions: &Extensions<GroupContext>,
@@ -746,7 +768,10 @@ impl ExpectedDiff {
         gce_proposer: &Option<CommitParticipant>,
         added_inbox_proposers: &HashMap<String, CommitParticipant>,
         removed_inbox_proposers: &HashMap<String, CommitParticipant>,
-    ) -> Result<ExpectedDiff, CommitValidationError> {
+    ) -> Result<ExpectedDiff, CommitValidationError>
+    where
+        Context: CommitValidationContext + Clone,
+    {
         let conn = context.db();
         let old_group_membership = extract_group_membership(existing_group_extensions)?;
         let new_group_membership = get_latest_group_membership(staged_commit)?;
@@ -811,7 +836,7 @@ impl ExpectedDiff {
             })
             .collect::<Result<Vec<Inbox>, CommitValidationError>>()?;
 
-        let identity_updates = IdentityUpdates::new(&context);
+        let identity_updates = IdentityUpdates::new(context);
         let expected_installation_diff = identity_updates
             .get_installation_diff(
                 &conn,

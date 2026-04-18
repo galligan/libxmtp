@@ -2,6 +2,7 @@ use super::membership::{
     calculate_membership_changes_with_keypackages, get_keypackages_for_installation_ids,
 };
 use super::*;
+use crate::identity_updates::IdentityStateContext;
 use crate::groups::{
     GroupError, build_group_membership_extension,
     intents::{PostCommitAction, UpdateGroupMembershipIntentData},
@@ -17,22 +18,42 @@ use openmls::{
 };
 use openmls_traits::signatures::Signer;
 
+pub(crate) trait MembershipUpdateContext: IdentityStateContext {
+    type MlsStorage: XmtpMlsStorageProvider;
+
+    fn mls_storage_ref(&self) -> &Self::MlsStorage;
+}
+
+impl<Context> MembershipUpdateContext for Context
+where
+    Context: XmtpSharedContext,
+{
+    type MlsStorage = Context::MlsStorage;
+
+    fn mls_storage_ref(&self) -> &Self::MlsStorage {
+        XmtpSharedContext::mls_storage(self)
+    }
+}
+
 // Takes UpdateGroupMembershipIntentData and applies it to the openmls group
 // returning the commit and post_commit_action
 #[tracing::instrument(level = "trace", skip_all)]
-pub(crate) async fn apply_update_group_membership_intent(
-    context: &impl XmtpSharedContext,
+pub(crate) async fn apply_update_group_membership_intent<Context>(
+    context: Context,
     openmls_group: &mut OpenMlsGroup,
     intent_data: UpdateGroupMembershipIntentData,
     signer: impl Signer,
-) -> Result<Option<PublishIntentData>, GroupError> {
+) -> Result<Option<PublishIntentData>, GroupError>
+where
+    Context: MembershipUpdateContext + Clone,
+{
     let extensions = openmls_group.extensions().clone();
     let old_group_membership = extract_group_membership(&extensions)?;
     let new_group_membership = intent_data.apply_to_group_membership(&old_group_membership);
     let membership_diff = old_group_membership.diff(&new_group_membership);
 
     let changes_with_kps = calculate_membership_changes_with_keypackages(
-        context,
+        context.clone(),
         openmls_group.group_id().as_slice(),
         &new_group_membership,
         &old_group_membership,
@@ -84,7 +105,7 @@ pub(crate) async fn apply_update_group_membership_intent(
     if proposals_currently_enabled {
         // Batched proposal path: proposals + GCE + commit in one publish
         let publish_intent_data = compute_publish_data_for_proposal_based_update(
-            context,
+            context.clone(),
             openmls_group,
             changes_with_kps.new_installations,
             changes_with_kps.new_key_packages,
@@ -111,18 +132,24 @@ pub(crate) async fn apply_update_group_membership_intent(
 }
 
 #[tracing::instrument(level = "trace", skip_all)]
-async fn compute_publish_data_for_group_membership_update(
-    context: &impl XmtpSharedContext,
+async fn compute_publish_data_for_group_membership_update<Context>(
+    context: Context,
     openmls_group: &mut OpenMlsGroup,
     installations_to_add: Vec<Installation>,
     key_packages_to_add: Vec<KeyPackage>,
     leaf_nodes_to_remove: Vec<LeafNodeIndex>,
     new_extensions: Extensions<GroupContext>,
     signer: impl Signer,
-) -> Result<PublishIntentData, GroupError> {
+) -> Result<PublishIntentData, GroupError>
+where
+    Context: MembershipUpdateContext,
+{
     // Use savepoint pattern to create commit without persisting state
     let ((commit, maybe_welcome_message, _), staged_commit, group_epoch) =
-        generate_commit_with_rollback(context.mls_storage(), openmls_group, |group, provider| {
+        generate_commit_with_rollback(
+            context.mls_storage_ref(),
+            openmls_group,
+            |group, provider| {
             group.update_group_membership(
                 provider,
                 &signer,
@@ -130,7 +157,8 @@ async fn compute_publish_data_for_group_membership_update(
                 &leaf_nodes_to_remove,
                 new_extensions,
             )
-        })?;
+        },
+        )?;
 
     let staged_commit = staged_commit.ok_or_else(|| GroupError::MissingPendingCommit)?;
 
@@ -156,15 +184,18 @@ async fn compute_publish_data_for_group_membership_update(
 /// that references them. All payloads are returned together so they can be published in a single
 /// `send_group_messages` call, eliminating multiple network roundtrips.
 #[tracing::instrument(level = "trace", skip_all)]
-async fn compute_publish_data_for_proposal_based_update(
-    context: &impl XmtpSharedContext,
+async fn compute_publish_data_for_proposal_based_update<Context>(
+    context: Context,
     openmls_group: &mut OpenMlsGroup,
     installations_to_add: Vec<Installation>,
     key_packages_to_add: Vec<KeyPackage>,
     leaf_nodes_to_remove: Vec<LeafNodeIndex>,
     new_extensions: Extensions<GroupContext>,
     signer: impl Signer,
-) -> Result<PublishIntentData, GroupError> {
+) -> Result<PublishIntentData, GroupError>
+where
+    Context: MembershipUpdateContext,
+{
     // Compare current extensions to new_extensions to determine if a GCE is needed.
     // This catches adds/removes, updated_inboxes (sequence ID bumps), and
     // failed_installations changes.
@@ -174,7 +205,10 @@ async fn compute_publish_data_for_proposal_based_update(
     let new_extensions_for_filter = new_extensions.clone();
 
     let ((proposal_payloads, bundle), staged_commit, group_epoch) =
-        generate_commit_with_rollback(context.mls_storage(), openmls_group, |group, provider| {
+        generate_commit_with_rollback(
+            context.mls_storage_ref(),
+            openmls_group,
+            |group, provider| {
             let mut proposal_payloads: Vec<Vec<u8>> = Vec::new();
 
             // 1. Create Add proposals
@@ -227,7 +261,8 @@ async fn compute_publish_data_for_proposal_based_update(
                 .map_err(CommitToPendingProposalsError::from)?;
 
             Ok::<_, GroupError>((proposal_payloads, bundle))
-        })?;
+        },
+        )?;
 
     let staged_commit = staged_commit.ok_or_else(|| GroupError::MissingPendingCommit)?;
     let (commit, maybe_welcome_message, _) = bundle.into_messages();
@@ -256,12 +291,15 @@ async fn compute_publish_data_for_proposal_based_update(
 }
 
 #[tracing::instrument(level = "trace", skip_all)]
-pub(crate) async fn apply_readd_installations_intent(
-    context: &impl XmtpSharedContext,
+pub(crate) async fn apply_readd_installations_intent<Context>(
+    context: Context,
     openmls_group: &mut OpenMlsGroup,
     intent_data: ReaddInstallationsIntentData,
     signer: impl Signer,
-) -> Result<Option<PublishIntentData>, GroupError> {
+) -> Result<Option<PublishIntentData>, GroupError>
+where
+    Context: MembershipUpdateContext + Clone,
+{
     let readded_installations: HashSet<Vec<u8>> =
         intent_data.readded_installations.into_iter().collect();
 
@@ -283,7 +321,7 @@ pub(crate) async fn apply_readd_installations_intent(
     let mut key_packages_to_welcome = Vec::new();
     let mut failed_installations = Vec::new();
     get_keypackages_for_installation_ids(
-        context,
+        context.clone(),
         installations_to_readd,
         &mut installations_to_welcome,
         &mut key_packages_to_welcome,

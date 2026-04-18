@@ -1,4 +1,5 @@
 use super::*;
+use crate::identity_updates::IdentityStateContext;
 
 impl<Context> MlsGroup<Context>
 where
@@ -163,15 +164,18 @@ where
     }
 }
 
-pub(super) async fn calculate_membership_changes_with_keypackages<'a>(
-    context: &impl XmtpSharedContext,
+pub(super) async fn calculate_membership_changes_with_keypackages<'a, Context>(
+    context: Context,
     group_id: &[u8],
     new_group_membership: &'a GroupMembership,
     old_group_membership: &'a GroupMembership,
-) -> Result<MembershipDiffWithKeyPackages, GroupError> {
+) -> Result<MembershipDiffWithKeyPackages, GroupError>
+where
+    Context: IdentityStateContext + Clone,
+{
     let membership_diff = old_group_membership.diff(new_group_membership);
 
-    let identity = IdentityUpdates::new(&context);
+    let identity = IdentityUpdates::new(context.clone());
     let mut installation_diff = identity
         .get_installation_diff(
             &context.db(),
@@ -188,7 +192,7 @@ pub(super) async fn calculate_membership_changes_with_keypackages<'a>(
 
     if !installation_diff.added_installations.is_empty() {
         get_keypackages_for_installation_ids(
-            context,
+            context.clone(),
             installation_diff.added_installations,
             &mut new_installations,
             &mut new_key_packages,
@@ -245,15 +249,18 @@ async fn inject_failed_installations_for_test(
     }
 }
 
-pub(super) async fn get_keypackages_for_installation_ids(
-    context: impl XmtpSharedContext,
+pub(super) async fn get_keypackages_for_installation_ids<Context>(
+    context: Context,
     requested_installations: HashSet<Vec<u8>>,
     fetched_installations: &mut Vec<Installation>,
     fetched_key_packages: &mut Vec<KeyPackage>,
     failed_installations: &mut Vec<Vec<u8>>,
-) -> Result<(), GroupError> {
+) -> Result<(), GroupError>
+where
+    Context: IdentityStateContext + Clone,
+{
     let my_installation_id = context.installation_id().to_vec();
-    let store = MlsStore::new(context.clone());
+    let store = MlsStore::new(context);
     #[allow(unused_mut)]
     let mut key_packages = store
         .get_key_packages_for_installation_ids(

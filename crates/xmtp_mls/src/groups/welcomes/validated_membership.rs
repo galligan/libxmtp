@@ -1,8 +1,7 @@
-use crate::context::XmtpSharedContext;
 use crate::groups::validated_commit::extract_group_membership;
 use crate::groups::{GroupError, filter_inbox_ids_needing_updates};
 use crate::identity::parse_credential;
-use crate::identity_updates::load_identity_updates;
+use crate::identity_updates::{IdentityStateContext, IdentityUpdates, load_identity_updates};
 use openmls::prelude::{BasicCredential, StagedWelcome};
 use std::collections::{HashMap, HashSet};
 
@@ -26,7 +25,7 @@ impl<C> InitialMembershipValidator<C> {
 
 impl<C> ValidateGroupMembership for InitialMembershipValidator<C>
 where
-    C: XmtpSharedContext,
+    C: IdentityStateContext + Clone,
 {
     async fn check_initial_membership(
         &self,
@@ -43,7 +42,7 @@ where
             load_identity_updates(self.context.api(), &db, ids.as_slice()).await?;
         }
 
-        let identity_updates = crate::identity_updates::IdentityUpdates::new(&self.context);
+        let identity_updates = IdentityUpdates::new(self.context.clone());
         let futures: Vec<_> = membership
             .members
             .iter()

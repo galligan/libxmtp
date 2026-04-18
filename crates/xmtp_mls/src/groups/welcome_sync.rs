@@ -13,8 +13,10 @@ use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
+use xmtp_api::{ApiClientWrapper, XmtpApi};
 use xmtp_common::Event;
 use xmtp_common::{Retry, retry_async};
+use xmtp_db::XmtpDb;
 use xmtp_db::refresh_state::EntityKind;
 use xmtp_db::{consent_record::ConsentState, group::GroupQueryArgs, prelude::*};
 use xmtp_macro::log_event;
@@ -202,29 +204,6 @@ where
         ))
     }
 
-    async fn filter_groups_needing_sync(
-        &self,
-        groups: Vec<MlsGroup<Context>>,
-    ) -> Result<Vec<MlsGroup<Context>>, GroupError> {
-        let db = self.context.db();
-        let api = self.context.api();
-
-        let group_ids: Vec<&[u8]> = groups.iter().map(|group| group.group_id.as_ref()).collect();
-        let last_synced_cursors = db.get_last_cursor_for_ids(
-            &group_ids,
-            &[EntityKind::ApplicationMessage, EntityKind::CommitMessage],
-        )?;
-        let latest_message_metadata = api.get_newest_message_metadata(group_ids).await?;
-
-        let group_ids_needing_sync =
-            filter_groups_with_new_messages(last_synced_cursors, latest_message_metadata);
-
-        Ok(groups
-            .into_iter()
-            .filter(|group| group_ids_needing_sync.contains(&group.group_id))
-            .collect::<Vec<_>>())
-    }
-
     pub async fn sync_all_welcomes_and_history_sync_groups(
         &self,
     ) -> Result<GroupSyncSummary, ClientError> {
@@ -341,6 +320,59 @@ where
             .await;
 
         Ok(active_group_count.load(Ordering::SeqCst))
+    }
+}
+
+#[doc(hidden)]
+trait WelcomeSyncQueryContext {
+    type Db: XmtpDb;
+    type ApiClient: XmtpApi;
+
+    fn db(&self) -> <Self::Db as XmtpDb>::DbQuery;
+    fn api(&self) -> &ApiClientWrapper<Self::ApiClient>;
+}
+
+impl<Context> WelcomeSyncQueryContext for Context
+where
+    Context: XmtpSharedContext,
+{
+    type Db = Context::Db;
+    type ApiClient = Context::ApiClient;
+
+    fn db(&self) -> <Self::Db as XmtpDb>::DbQuery {
+        XmtpSharedContext::db(self)
+    }
+
+    fn api(&self) -> &ApiClientWrapper<Self::ApiClient> {
+        XmtpSharedContext::api(self)
+    }
+}
+
+impl<Context> WelcomeService<Context> {
+    async fn filter_groups_needing_sync(
+        &self,
+        groups: Vec<MlsGroup<Context>>,
+    ) -> Result<Vec<MlsGroup<Context>>, GroupError>
+    where
+        Context: WelcomeSyncQueryContext,
+    {
+        let db = self.context.db();
+        let api = self.context.api();
+
+        let group_ids: Vec<&[u8]> = groups.iter().map(|group| group.group_id.as_ref()).collect();
+        let last_synced_cursors = db.get_last_cursor_for_ids(
+            &group_ids,
+            &[EntityKind::ApplicationMessage, EntityKind::CommitMessage],
+        )?;
+        let latest_message_metadata = api.get_newest_message_metadata(group_ids).await?;
+
+        let group_ids_needing_sync =
+            filter_groups_with_new_messages(last_synced_cursors, latest_message_metadata);
+
+        Ok(groups
+            .into_iter()
+            .filter(|group| group_ids_needing_sync.contains(&group.group_id))
+            .collect::<Vec<_>>())
     }
 }
 
