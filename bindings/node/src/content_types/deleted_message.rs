@@ -1,4 +1,5 @@
 use napi_derive::napi;
+use xmtp_mls::DeletedBy as XmtpDeletedBy;
 
 #[napi(string_enum)]
 #[derive(Clone, PartialEq)]
@@ -14,23 +15,23 @@ pub struct DeletedMessage {
   pub admin_inbox_id: Option<String>,
 }
 
-impl From<xmtp_mls::messages::decoded_message::DeletedBy> for DeletedBy {
-  fn from(value: xmtp_mls::messages::decoded_message::DeletedBy) -> Self {
+impl From<XmtpDeletedBy> for DeletedBy {
+  fn from(value: XmtpDeletedBy) -> Self {
     match value {
-      xmtp_mls::messages::decoded_message::DeletedBy::Sender => DeletedBy::Sender,
-      xmtp_mls::messages::decoded_message::DeletedBy::Admin(_) => DeletedBy::Admin,
+      XmtpDeletedBy::Sender => DeletedBy::Sender,
+      XmtpDeletedBy::Admin(_) => DeletedBy::Admin,
     }
   }
 }
 
-impl From<xmtp_mls::messages::decoded_message::DeletedBy> for DeletedMessage {
-  fn from(value: xmtp_mls::messages::decoded_message::DeletedBy) -> Self {
+impl From<XmtpDeletedBy> for DeletedMessage {
+  fn from(value: XmtpDeletedBy) -> Self {
     match value {
-      xmtp_mls::messages::decoded_message::DeletedBy::Sender => DeletedMessage {
+      XmtpDeletedBy::Sender => DeletedMessage {
         deleted_by: DeletedBy::Sender,
         admin_inbox_id: None,
       },
-      xmtp_mls::messages::decoded_message::DeletedBy::Admin(inbox_id) => DeletedMessage {
+      XmtpDeletedBy::Admin(inbox_id) => DeletedMessage {
         deleted_by: DeletedBy::Admin,
         admin_inbox_id: Some(inbox_id),
       },

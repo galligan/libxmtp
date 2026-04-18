@@ -12,9 +12,7 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 use xmtp_api_d14n::MessageBackendBuilder;
 use xmtp_configuration::{MAX_DB_POOL_SIZE, MIN_DB_POOL_SIZE};
 use xmtp_db::{EncryptedMessageStore, EncryptionKey, NativeDb};
-use xmtp_mls::XmtpApiClient;
-use xmtp_mls::cursor_store::SqliteCursorStore;
-use xmtp_mls::identity::IdentityStrategy;
+use xmtp_mls::{IdentityStrategy, SqliteCursorStore, XmtpApiClient};
 
 static LOGGER_INIT: std::sync::OnceLock<Result<()>> = std::sync::OnceLock::new();
 

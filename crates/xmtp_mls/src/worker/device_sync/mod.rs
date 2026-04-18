@@ -17,8 +17,7 @@ use prost::Message;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::broadcast::error::RecvError;
-use worker::SyncMetric;
-use xmtp_archive::{ArchiveError, BackupMetadata};
+use xmtp_archive::ArchiveError;
 use xmtp_common::ErrorCode;
 use xmtp_common::RetryableError;
 use xmtp_db::{NotFound, StorageError, group_message::StoredGroupMessage};
@@ -42,7 +41,12 @@ pub mod preference_sync;
 pub(crate) mod sync_group;
 pub mod worker;
 
+pub use archive::insert_importer;
+pub use preference_sync::PreferenceUpdate;
+pub use worker::SyncMetric;
 pub use xmtp_archive::archive_options::{ArchiveOptions, BackupElementSelection};
+pub use xmtp_archive::exporter::ArchiveExporter;
+pub use xmtp_archive::{ArchiveImporter, BACKUP_VERSION, BackupMetadata, ENC_KEY_SIZE};
 
 #[cfg(test)]
 mod tests;

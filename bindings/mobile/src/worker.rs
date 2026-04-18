@@ -1,5 +1,6 @@
 use crate::FfiError;
 use std::sync::Arc;
+use xmtp_mls::{DeviceSyncMode, worker::device_sync::SyncMetric, worker::metrics::WorkerMetrics};
 
 #[derive(uniffi::Object)]
 pub struct FfiSyncWorker {
@@ -53,11 +54,6 @@ impl From<FfiSyncMetric> for SyncMetric {
         }
     }
 }
-use xmtp_mls::{
-    builder::DeviceSyncMode, worker::device_sync::worker::SyncMetric,
-    worker::metrics::WorkerMetrics,
-};
-
 #[derive(uniffi::Enum)]
 pub enum FfiDeviceSyncMode {
     Enabled,

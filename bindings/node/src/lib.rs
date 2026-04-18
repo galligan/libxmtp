@@ -1,3 +1,9 @@
+//! Node.js entrypoint for libxmtp bindings.
+//!
+//! The napi surface is intentionally organized around a few compatibility
+//! boundaries: Rust error translation, JS-friendly stream callbacks, and thin
+//! wrappers over the shared Rust client types.
+
 #![recursion_limit = "256"]
 #![warn(clippy::unwrap_used)]
 
@@ -27,8 +33,11 @@ xmtp_common::if_test! {
 use napi::bindgen_prelude::Error;
 use xmtp_common::ErrorCode;
 
-/// Wrapper for errors that implement ErrorCode trait.
-/// Prefixes the error message with the error code.
+/// Wrapper for errors that implement `ErrorCode`.
+///
+/// This is the Node compatibility layer for surfaced Rust errors. We preserve
+/// the machine-readable code in the JS-visible message format rather than
+/// exporting Rust error enums directly through napi.
 ///
 /// Format: `[ErrorType::Variant] error message`
 ///

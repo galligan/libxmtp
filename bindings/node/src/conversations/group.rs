@@ -6,7 +6,7 @@ use crate::identity::Identifier;
 use crate::permissions::{GroupPermissionsOptions, PermissionPolicySet};
 use napi::bindgen_prelude::{Error, Result};
 use napi_derive::napi;
-use xmtp_mls::groups::PreconfiguredPolicies;
+use xmtp_mls::PreconfiguredPolicies;
 use xmtp_mls::mls_common::group::GroupMetadataOptions;
 
 #[napi(object)]

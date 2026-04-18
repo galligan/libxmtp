@@ -12,7 +12,7 @@ use xmtp_db::group::GroupMembershipState as XmtpGroupMembershipState;
 use xmtp_db::group::GroupQueryArgs;
 use xmtp_db::group::{ConversationType as XmtpConversationType, GroupQueryOrderBy};
 use xmtp_db::user_preferences::HmacKey as XmtpHmacKey;
-use xmtp_mls::groups::PreconfiguredPolicies;
+use xmtp_mls::PreconfiguredPolicies;
 use xmtp_mls::mls_common::group::{DMMetadataOptions, GroupMetadataOptions};
 use xmtp_mls::mls_common::group_mutable_metadata::MessageDisappearingSettings as XmtpMessageDisappearingSettings;
 use xmtp_proto::types::Cursor as XmtpCursor;
@@ -592,6 +592,9 @@ impl Conversations {
   }
 
   /// Returns a 'ReadableStream' of Conversations
+  ///
+  /// This local stream variant is useful when JS wants pull-based consumption
+  /// instead of callback-driven delivery.
   #[wasm_bindgen(js_name = streamLocal)]
   pub async fn stream_conversations_local(
     &self,
@@ -605,6 +608,10 @@ impl Conversations {
     Ok(ReadableStream::from_stream(stream).into_raw())
   }
 
+  /// Subscribe to conversation bootstrap events using callbacks.
+  ///
+  /// The callback is only invoked once the Rust core has turned welcomes and
+  /// local events into usable conversation handles.
   #[wasm_bindgen(js_name = stream)]
   pub fn stream(
     &self,
@@ -626,6 +633,7 @@ impl Conversations {
     Ok(StreamCloser::new(stream_closer))
   }
 
+  /// Subscribe to all replayable messages that match the optional filters.
   #[wasm_bindgen(js_name = "streamAllMessages")]
   pub fn stream_all_messages(
     &self,
@@ -650,6 +658,7 @@ impl Conversations {
     Ok(StreamCloser::new(stream_closer))
   }
 
+  /// Subscribe to consent changes from local actions and synced device updates.
   #[wasm_bindgen(js_name = "streamConsent")]
   pub fn stream_consent(&self, callback: StreamCallback) -> Result<StreamCloser, JsError> {
     let on_close_cb = callback.clone();
@@ -668,6 +677,7 @@ impl Conversations {
     Ok(StreamCloser::new(stream_closer))
   }
 
+  /// Subscribe to user preference updates replicated through device sync.
   #[wasm_bindgen(js_name = "streamPreferences")]
   pub fn stream_preferences(&self, callback: StreamCallback) -> Result<StreamCloser, JsError> {
     let on_close_cb = callback.clone();
@@ -683,6 +693,7 @@ impl Conversations {
     Ok(StreamCloser::new(stream_closer))
   }
 
+  /// Subscribe to deletions emitted by the disappearing-messages worker.
   #[wasm_bindgen(js_name = "streamMessageDeletions")]
   pub fn stream_message_deletions(
     &self,

@@ -1,3 +1,9 @@
+//! WASM stream adapters and lifecycle handles.
+//!
+//! These types bridge Rust async streams into browser-friendly callback and
+//! `ReadableStream` patterns without exposing runtime-specific task machinery to
+//! JavaScript.
+
 use crate::ErrorWrapper;
 use crate::client::RustMlsGroup;
 use crate::conversation::Conversation;
@@ -50,12 +56,14 @@ extern "C" {
 
 #[wasm_bindgen]
 #[derive(Clone)]
+/// Handle used by JS callers to stop and await long-lived Rust stream tasks.
 pub struct StreamCloser {
   handle: Rc<RefCell<Option<StreamHandle>>>,
   abort: Rc<Box<dyn AbortHandle>>,
 }
 
 impl StreamCloser {
+  /// Wraps a Rust stream task in a JS-friendly closer.
   pub fn new(
     handle: impl XmtpStreamHandle<StreamOutput = Result<(), XmtpSubscribeError>> + 'static,
   ) -> Self {
@@ -122,6 +130,7 @@ impl StreamCloser {
 
 // JS-Compatible Conversation stream
 #[pin_project]
+/// Adapter that turns a Rust conversation stream into a `ReadableStream`-ready shape.
 pub struct ConversationStream<'a> {
   #[pin]
   stream: LocalBoxStream<'a, Result<RustMlsGroup, XmtpSubscribeError>>,

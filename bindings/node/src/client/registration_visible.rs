@@ -13,11 +13,9 @@ pub struct VisibilityConfirmationOptions {
   pub timeout_ms: Option<u32>,
 }
 
-impl From<VisibilityConfirmationOptions>
-  for xmtp_mls::registration_visible::VisibilityConfirmationOptions
-{
+impl From<VisibilityConfirmationOptions> for xmtp_mls::VisibilityConfirmationOptions {
   fn from(opts: VisibilityConfirmationOptions) -> Self {
-    use xmtp_mls::registration_visible::Quorum;
+    use xmtp_mls::Quorum;
 
     let defaults = Self::default();
     let quorum = match (opts.quorum_absolute, opts.quorum_percentage) {

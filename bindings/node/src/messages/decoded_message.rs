@@ -4,7 +4,7 @@ use crate::messages::{DeliveryStatus, GroupMessageKind};
 use napi::Error;
 use napi::bindgen_prelude::{BigInt, Result};
 use napi_derive::napi;
-use xmtp_mls::messages::decoded_message::DecodedMessage as XmtpDecodedMessage;
+use xmtp_mls::DecodedMessage as XmtpDecodedMessage;
 
 #[derive(Clone)]
 #[napi]

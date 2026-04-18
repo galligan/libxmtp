@@ -17,7 +17,26 @@ pub mod registration_visible;
 pub mod subscriptions;
 pub mod utils;
 pub mod worker;
+pub use builder::{DeviceSyncMode, ForkRecoveryOpts, ForkRecoveryPolicy};
+pub use client::inbox_addresses_with_verifier;
+pub use context::{XmtpMlsLocalContext, XmtpSharedContext};
+pub use cursor_store::SqliteCursorStore;
 pub use definitions::*;
+pub use groups::{
+    ConversationDebugInfo, MlsGroup, PreconfiguredPolicies, UpdateAdminListType,
+    send_message_opts::SendMessageOpts, welcome_sync::GroupSyncSummary,
+};
+pub use identity::IdentityStrategy;
+pub use identity_updates::{
+    apply_signature_request_with_verifier, get_creation_signature_kind,
+    is_member_of_association_state, revoke_installations_with_verifier,
+};
+pub use messages::decoded_message::{
+    DecodedMessage, DecodedMessageMetadata, DeletedBy, Markdown, MessageBody,
+    Reply as DecodedReply, Text,
+};
+pub use registration_visible::{Quorum, VisibilityConfirmationOptions};
+pub use subscriptions::SubscribeError;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test;

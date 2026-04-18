@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use tsify::Tsify;
 use wasm_bindgen::JsError;
-use xmtp_mls::messages::decoded_message::MessageBody;
+use xmtp_mls::MessageBody;
 
 use super::{
   actions::Actions, attachment::Attachment, deleted_message::DeletedMessage,

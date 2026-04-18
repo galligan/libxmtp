@@ -14,7 +14,7 @@ use super::wallet_send_calls::WalletSendCalls;
 use crate::messages::encoded_content::EncodedContent;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use xmtp_mls::messages::decoded_message::MessageBody;
+use xmtp_mls::MessageBody;
 
 #[napi(string_enum)]
 #[derive(Clone, PartialEq)]

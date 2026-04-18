@@ -10,6 +10,7 @@ use napi_derive::napi;
 use prost::Message as ProstMessage;
 use std::{collections::HashMap, ops::Deref};
 use xmtp_db::group_message::MsgQueryArgs;
+use xmtp_mls::SendMessageOpts as XmtpSendMessageOpts;
 use xmtp_proto::xmtp::mls::message_contents::EncodedContent as XmtpEncodedContent;
 
 #[napi(object)]
@@ -18,9 +19,9 @@ pub struct SendMessageOpts {
   pub optimistic: Option<bool>,
 }
 
-impl From<SendMessageOpts> for xmtp_mls::groups::send_message_opts::SendMessageOpts {
+impl From<SendMessageOpts> for XmtpSendMessageOpts {
   fn from(opts: SendMessageOpts) -> Self {
-    xmtp_mls::groups::send_message_opts::SendMessageOpts {
+    XmtpSendMessageOpts {
       should_push: opts.should_push,
     }
   }

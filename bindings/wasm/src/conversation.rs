@@ -44,6 +44,7 @@ use xmtp_content_types::{
 };
 use xmtp_db::group::DmIdExt;
 use xmtp_mls::{
+  SendMessageOpts as XmtpSendMessageOpts,
   groups::{
     MlsGroup, UpdateAdminListType, intents::PermissionUpdateType as XmtpPermissionUpdateType,
     members::PermissionLevel as XmtpPermissionLevel,
@@ -65,9 +66,9 @@ pub struct SendMessageOpts {
   pub optimistic: Option<bool>,
 }
 
-impl From<SendMessageOpts> for xmtp_mls::groups::send_message_opts::SendMessageOpts {
+impl From<SendMessageOpts> for XmtpSendMessageOpts {
   fn from(opts: SendMessageOpts) -> Self {
-    xmtp_mls::groups::send_message_opts::SendMessageOpts {
+    XmtpSendMessageOpts {
       should_push: opts.should_push,
     }
   }

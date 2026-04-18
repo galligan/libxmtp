@@ -11,7 +11,7 @@ use xmtp_db::NativeDb;
 use xmtp_id::associations::{AssociationState, MemberIdentifier, ident};
 use xmtp_id::key_package::{VerifiedKeyPackageV2, VerifiedLifetime};
 use xmtp_id::scw_verifier::SmartContractSignatureVerifier;
-use xmtp_mls::client::inbox_addresses_with_verifier;
+use xmtp_mls::inbox_addresses_with_verifier;
 
 #[napi(object)]
 pub struct Installation {

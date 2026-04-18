@@ -1,20 +1,26 @@
+//! Mobile-facing device-sync and archive APIs.
+//!
+//! These methods intentionally mirror the core `DeviceSyncClient` surface while
+//! keeping the exported types UniFFI-friendly. The binding stays thin so the
+//! archive and sync-group behavior remains shared across mobile, Node, and WASM.
+
 #[cfg(test)]
 mod tests;
 
 use crate::{FfiError, FfiGroupSyncSummary, FfiXmtpClient};
 use xmtp_id::associations::DeserializationError;
 use xmtp_mls::worker::device_sync::{
-    ArchiveOptions, AvailableArchive, BackupElementSelection, DeviceSyncError,
-    archive::{
-        ArchiveImporter, BACKUP_VERSION, BackupMetadata, ENC_KEY_SIZE, exporter::ArchiveExporter,
-        insert_importer,
-    },
+    ArchiveExporter, ArchiveImporter, ArchiveOptions, AvailableArchive, BACKUP_VERSION,
+    BackupElementSelection, BackupMetadata, DeviceSyncError, ENC_KEY_SIZE, insert_importer,
 };
 use xmtp_proto::xmtp::device_sync::BackupElementSelection as BackupElementSelectionProto;
 
 #[uniffi::export(async_runtime = "tokio")]
 impl FfiXmtpClient {
     /// Manually trigger a device sync request to sync records from another active device on this account.
+    ///
+    /// This asks another installation in the sync group to publish an archive
+    /// matching the requested element selection and time range.
     pub async fn send_sync_request(
         &self,
         options: FfiArchiveOptions,
@@ -28,7 +34,8 @@ impl FfiXmtpClient {
     }
 
     /// Manually send a sync archive to the sync group.
-    /// The pin will be later used as a reference when importing.
+    ///
+    /// The pin becomes the stable lookup key used by later import calls.
     pub async fn send_sync_archive(
         &self,
         options: FfiArchiveOptions,
@@ -43,7 +50,10 @@ impl FfiXmtpClient {
     }
 
     /// Manually process a sync archive that matches the pin given.
-    /// If no pin is given, then it will process the last archive sent.
+    ///
+    /// If no pin is given, the most recently seen archive is used as the import
+    /// candidate. This is primarily a recovery/debugging surface, not the normal
+    /// automatic worker flow.
     pub async fn process_sync_archive(&self, archive_pin: Option<String>) -> Result<(), FfiError> {
         self.inner_client
             .device_sync_client()
@@ -115,6 +125,7 @@ impl FfiXmtpClient {
 }
 
 #[derive(uniffi::Record)]
+/// Selection and time-range controls shared by archive export and sync requests.
 pub struct FfiArchiveOptions {
     pub start_ns: Option<i64>,
     pub end_ns: Option<i64>,
@@ -146,6 +157,7 @@ impl From<FfiArchiveOptions> for ArchiveOptions {
 }
 
 #[derive(uniffi::Enum)]
+/// The backup elements that bindings can explicitly request across platforms.
 pub enum FfiBackupElementSelection {
     Messages,
     Consent,

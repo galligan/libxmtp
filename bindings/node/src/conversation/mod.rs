@@ -1,7 +1,7 @@
 use crate::{ErrorWrapper, client::RustMlsGroup};
 use napi::bindgen_prelude::{BigInt, Result};
 use napi_derive::napi;
-use xmtp_mls::groups::MlsGroup;
+use xmtp_mls::MlsGroup;
 
 pub mod consent_state;
 pub mod content_types;
