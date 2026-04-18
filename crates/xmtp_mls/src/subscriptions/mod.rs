@@ -1,3 +1,13 @@
+//! Subscription surfaces that turn local worker events and remote network events
+//! into stable client-facing streams.
+//!
+//! The modules in this tree deliberately sit between the transport layer and
+//! higher-level `Client`/binding APIs. They are responsible for:
+//! - normalizing remote welcome/group/message events with local worker events,
+//! - delegating non-trivial replay and catch-up work to sync paths, and
+//! - preserving retryability semantics so binding surfaces can decide whether to
+//!   continue, re-open, or surface an error.
+
 pub(crate) use stream_conversations::WelcomeOrGroup;
 
 pub(crate) mod d14n_compat;
@@ -130,8 +140,11 @@ impl RetryableError for SubscribeError {
 
 #[derive(Debug, Clone, Copy)]
 pub enum StreamKind {
+    /// Combined welcome/group stream used to surface conversations.
     All,
+    /// Welcome/group stream scoped to conversation creation and catch-up.
     Conversations,
+    /// Message stream scoped to already-known conversations.
     Messages,
 }
 

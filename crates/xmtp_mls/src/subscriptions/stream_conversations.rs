@@ -1,3 +1,11 @@
+//! Conversation stream orchestration.
+//!
+//! This stream is the bootstrap surface used by bindings when they want
+//! "conversations" rather than raw protocol events. It merges:
+//! - remote welcomes,
+//! - local synthetic group events, and
+//! - follow-on catch-up work needed to hand callers a usable `MlsGroup`.
+
 mod adapters;
 #[cfg(test)]
 mod tests;
@@ -163,6 +171,11 @@ where
         .await
     }
 
+    /// Builds the stream from either borrowed or owned context.
+    ///
+    /// This is the single initialization path used by both borrowed and owned
+    /// constructors so that cursor setup, event fan-in, and dedupe state all stay
+    /// aligned across bindings.
     pub async fn from_cow(
         context: Cow<'a, C>,
         conversation_type: Option<ConversationType>,
@@ -208,6 +221,8 @@ where
     C::ApiClient: XmtpMlsStreams + 'static,
     C::Db: 'static,
 {
+    /// Creates an owned stream for bindings that cannot borrow client state for
+    /// the lifetime of the subscription task.
     pub async fn new_owned(
         context: C,
         conversation_type: Option<ConversationType>,

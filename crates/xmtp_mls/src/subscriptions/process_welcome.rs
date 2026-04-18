@@ -1,3 +1,13 @@
+//! Welcome processing for conversation streams.
+//!
+//! This future is the bridge between the raw "welcome or known group" inputs
+//! emitted by subscription plumbing and the higher-level `MlsGroup` values that
+//! conversation streams expose to callers. It owns the bootstrap rules around:
+//! - deduplicating welcomes that are already persisted,
+//! - reloading groups after welcome sync has materialized them locally, and
+//! - attaching the cursor metadata that downstream stream consumers need for
+//!   follow-on message replay.
+
 mod filtering;
 mod loading;
 
@@ -12,7 +22,7 @@ use xmtp_db::{
 };
 use xmtp_proto::types::{Cursor, GlobalCursor, WelcomeMessage};
 
-/// Future for processing `WelcomeorGroup`
+/// Future for processing a `WelcomeOrGroup` item into a streamable conversation.
 pub struct ProcessWelcomeFuture<Context> {
     /// welcome ids in DB and which are already processed
     known_welcome_ids: HashSet<Cursor>,
@@ -25,20 +35,20 @@ pub struct ProcessWelcomeFuture<Context> {
 }
 
 pub enum ProcessWelcomeResult<Context> {
-    /// New Group and welcome id
+    /// A newly materialized group paired with the welcome cursor that created it.
     New {
         group: MlsGroup<Context>,
         id: Cursor,
     },
-    /// A group we already have/we created that might not have a welcome id
+    /// A group that already exists locally and may not have a welcome cursor.
     NewStored {
         group: MlsGroup<Context>,
         maybe_sequence_id: Option<i64>,
         maybe_originator: Option<i64>,
     },
-    /// Skip this welcome but add and id to known welcome ids
+    /// Skip this welcome but remember its cursor so we do not reprocess it.
     IgnoreId { id: Cursor },
-    /// Skip this payload
+    /// Skip this payload without mutating dedupe state.
     Ignore,
 }
 
@@ -88,7 +98,7 @@ where
     }
 }
 
-/// bulk of the processing for a new welcome/group
+/// The main welcome/group bootstrap logic for conversation streams.
 impl<Context> ProcessWelcomeFuture<Context>
 where
     Context: XmtpSharedContext,
@@ -238,6 +248,11 @@ where
         loading::load_from_store(&self.context, cursor)
     }
 
+    /// Finds the latest attach cursor for replayable content in this group.
+    ///
+    /// Conversation streams use this cursor as the hand-off point between
+    /// "bootstrap the group exists" and "replay messages that should now be
+    /// attached to the stream".
     fn stream_attach_cursor_for_group(&self, group_id: &[u8]) -> Result<Option<GlobalCursor>> {
         Ok(self
             .context
