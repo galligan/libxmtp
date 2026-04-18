@@ -1,9 +1,19 @@
+//! Top-level orchestration for a full group sync pass.
+//!
+//! The orchestration layer intentionally keeps publishing, receiving, and
+//! post-commit work loosely coupled in the returned `SyncSummary`: one phase
+//! can fail without hiding useful work completed by the others.
+
 use super::*;
 
 impl<Context> MlsGroup<Context>
 where
     Context: XmtpSharedContext,
 {
+    /// Run one best-effort sync cycle for this group and any stitched DMs.
+    ///
+    /// Stitched DMs are synced first so their transcript state is current
+    /// before the primary group folds any mirrored updates into its own view.
     #[tracing::instrument]
     pub async fn sync(&self) -> Result<SyncSummary, GroupError> {
         let conn = self.context.db();
@@ -36,9 +46,11 @@ where
         Ok(sync_summary)
     }
 
-    /// Sync from the network with the 'conn' (local database).
-    /// must return a summary of all messages synced, whether they were
-    /// successful or not.
+    /// Execute publish, receive, and post-commit work while preserving partial results.
+    ///
+    /// The returned summary is intentionally lossy in only one direction: it
+    /// records every phase outcome we observed so callers can decide whether to
+    /// retry, even when one phase failed after another already made progress.
     #[cfg_attr(any(test, feature = "test-utils"), tracing::instrument(fields(who = %self.context.inbox_id())))]
     #[cfg_attr(not(any(test, feature = "test-utils")), tracing::instrument(skip_all))]
     pub async fn sync_with_conn(&self) -> Result<SyncSummary, SyncSummary> {

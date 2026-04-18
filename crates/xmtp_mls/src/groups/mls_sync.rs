@@ -1,3 +1,10 @@
+//! Synchronization pipeline for reconciling local intents with remote MLS traffic.
+//!
+//! This module is the coordination surface for the refactored group sync flow:
+//! `publish` prepares and sends local work, `receive` pulls remote envelopes,
+//! `processing` validates and applies them, and `persistence` commits the
+//! durable side effects that survive retries and restarts.
+
 use super::{
     GroupError, HmacKey, MlsGroup, build_extensions_for_admin_lists_update,
     build_extensions_for_metadata_update, build_extensions_for_permissions_update,

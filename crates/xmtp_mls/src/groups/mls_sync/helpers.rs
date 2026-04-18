@@ -1,7 +1,11 @@
 use super::*;
 
-// Extracts the message sender, but does not do any validation to ensure that the
-// installation_id is actually part of the inbox.
+/// Shared helper utilities for the sync pipeline.
+
+/// Extract the sender identity from a processed MLS message.
+///
+/// This trusts the credential embedded in the message; inbox membership checks
+/// happen in higher-level validation paths.
 pub(super) fn extract_message_sender(
     openmls_group: &mut OpenMlsGroup,
     decrypted_message: &ProcessedMessage,
@@ -111,6 +115,11 @@ pub(crate) fn decode_staged_commit(
     Ok(xmtp_db::db_deserialize(data)?)
 }
 
+/// Reset or fail a published intent after transport send fails.
+///
+/// Retryable failures go back to `ToPublish` so the next attempt re-encrypts at
+/// the latest epoch. Non-retryable failures are recorded as terminal intent
+/// errors along with their synthetic failed message rows.
 pub(super) fn handle_published_intent_send_failure<Db: QueryGroupIntent>(
     db: &Db,
     intent: &StoredGroupIntent,

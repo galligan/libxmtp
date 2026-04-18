@@ -1,3 +1,9 @@
+//! Group-scoped streaming helpers.
+//!
+//! These adapters sit between the lower-level subscription machinery and the `MlsGroup` facade.
+//! They keep message decoding, cursor-backed ordering, and callback lifetime management out of the
+//! rest of the group modules so streaming remains a separate concern from mutation and replay.
+
 use super::MlsGroup;
 use crate::{
     context::XmtpSharedContext,
@@ -33,9 +39,11 @@ impl<Context> MlsGroup<Context>
 where
     Context: XmtpSharedContext,
 {
-    /// External proxy for `process_stream_entry`
-    /// Useful for streaming outside of an InboxApp, like for Push Notifications.
-    /// In case d14n iceboxes the message, returns an empty vector.
+    /// Decodes one streamed envelope and runs it through the normal group-message processors.
+    ///
+    /// This is the escape hatch for environments that receive envelopes outside the usual inbox
+    /// streaming stack, such as push-notification handlers. D14N messages may fan out into zero or
+    /// more stored group messages after ordering and extraction.
     pub async fn process_streamed_group_message(
         &self,
         envelope_bytes: Vec<u8>,
@@ -97,6 +105,10 @@ where
             .await
     }
 
+    /// Opens a borrowed stream of stored group messages for this conversation.
+    ///
+    /// The returned stream is tied to the lifetime of the current context reference, which makes it
+    /// the cheapest option when the caller already owns a long-lived client.
     pub async fn stream<'a>(
         &'a self,
     ) -> Result<impl Stream<Item = Result<StoredGroupMessage>> + use<'a, Context>>
@@ -106,7 +118,10 @@ where
         StreamGroupMessages::new(&self.context, vec![self.group_id.clone().into()]).await
     }
 
-    /// create a stream that is not attached to any lifetime
+    /// Opens an owned stream that outlives the borrowed `MlsGroup` handle.
+    ///
+    /// This clones the shared context so callback- or task-based consumers can hold the stream
+    /// independently of the original binding object.
     pub async fn stream_owned(
         &self,
     ) -> Result<impl Stream<Item = Result<StoredGroupMessage>> + 'static>
@@ -119,6 +134,10 @@ where
             .await
     }
 
+    /// Bridges the async stream API into callback-oriented consumers.
+    ///
+    /// This is primarily for bindings and notification paths that need a push-style API instead of
+    /// manually polling a Rust `Stream`.
     pub fn stream_with_callback(
         context: Context,
         group_id: Vec<u8>,
@@ -139,8 +158,10 @@ where
 }
 
 // TODO: there's a better way than #[cfg]
-/// Stream messages from groups in `group_id_to_info`, passing
-/// messages along to a callback.
+/// Runs a multi-group stream until exhaustion, forwarding each message to a callback.
+///
+/// The returned handle owns the spawned task and invokes `on_close` on both normal stream
+/// termination and early setup failure so bindings can deterministically tear down listeners.
 pub(crate) fn stream_messages_with_callback<Context>(
     context: Context,
     active_conversations: impl Iterator<Item = GroupId> + MaybeSend + 'static,
