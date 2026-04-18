@@ -1,13 +1,17 @@
+//! Helpers for paused groups and waiting on intent resolution.
+
 use super::*;
 use xmtp_common::{MaybeSend, MaybeSync};
 use xmtp_db::StorageError;
 
+/// Minimal hooks needed to decide whether a paused group can resume syncing.
 pub(super) trait PauseResolutionContext: MaybeSend + MaybeSync {
     fn paused_group_version(&self, group_id: &[u8]) -> Result<Option<String>, GroupError>;
     fn unpause_group(&self, group_id: &[u8]) -> Result<(), GroupError>;
     fn current_pkg_version(&self) -> &str;
 }
 
+/// Snapshot of the latest intent state relevant to a caller waiting on completion.
 #[derive(Debug)]
 pub(super) enum IntentResolutionStatus {
     Processed,
@@ -21,6 +25,7 @@ pub(super) enum IntentResolutionStatus {
     },
 }
 
+/// Query surface used by the retry loop that waits for local intent resolution.
 pub(super) trait IntentResolutionQueryContext: MaybeSend + MaybeSync {
     fn latest_resolvable_intent_id(&self, group_id: &[u8]) -> Result<Option<ID>, StorageError>;
     fn intent_resolution_status(
@@ -86,6 +91,7 @@ where
     }
 }
 
+/// Unpause a group only after the local binary satisfies the recorded version floor.
 pub(super) fn resolve_paused_group<Context>(
     context: &Context,
     group_id: &[u8],
@@ -130,6 +136,7 @@ impl<Context> MlsGroup<Context>
 where
     Context: XmtpSharedContext,
 {
+    /// Re-check paused-group state before attempting any network work.
     pub(super) fn handle_group_paused(&self) -> Result<(), GroupError> {
         resolve_paused_group(&self.context, &self.group_id)
     }
@@ -147,13 +154,11 @@ where
         self.sync_until_intent_resolved(intent_id).await
     }
 
-    /**
-     * Sync the group and wait for the intent to be deleted
-     * Group syncing may involve picking up messages unrelated to the intent, so simply checking for errors
-     * does not give a clear signal as to whether the intent was successfully completed or not.
-     *
-     * This method will retry up to `xmtp_configuration::MAX_GROUP_SYNC_RETRIES` times.
-     */
+    /// Keep syncing until the targeted intent leaves the pending states.
+    ///
+    /// A full sync can surface unrelated errors, so callers that care about one
+    /// intent use this helper instead of inferring completion from a single
+    /// `sync` result.
     #[cfg_attr(any(test, feature = "test-utils"), tracing::instrument(level = "info", fields(who = %self.context.inbox_id()), skip(self)))]
     #[cfg_attr(
         not(any(test, feature = "test-utils")),

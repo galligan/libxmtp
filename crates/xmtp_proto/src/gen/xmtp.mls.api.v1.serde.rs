@@ -5374,11 +5374,20 @@ impl serde::Serialize for WelcomeMetadata {
         if self.message_cursor != 0 {
             len += 1;
         }
+        if self.added_by_inbox_is_pending_remove {
+            len += 1;
+        }
         let mut struct_ser = serializer.serialize_struct("xmtp.mls.api.v1.WelcomeMetadata", len)?;
         if self.message_cursor != 0 {
             #[allow(clippy::needless_borrow)]
             #[allow(clippy::needless_borrows_for_generic_args)]
             struct_ser.serialize_field("message_cursor", ToString::to_string(&self.message_cursor).as_str())?;
+        }
+        if self.added_by_inbox_is_pending_remove {
+            struct_ser.serialize_field(
+                "added_by_inbox_is_pending_remove",
+                &self.added_by_inbox_is_pending_remove,
+            )?;
         }
         struct_ser.end()
     }
@@ -5392,11 +5401,14 @@ impl<'de> serde::Deserialize<'de> for WelcomeMetadata {
         const FIELDS: &[&str] = &[
             "message_cursor",
             "messageCursor",
+            "added_by_inbox_is_pending_remove",
+            "addedByInboxIsPendingRemove",
         ];
 
         #[allow(clippy::enum_variant_names)]
         enum GeneratedField {
             MessageCursor,
+            AddedByInboxIsPendingRemove,
             __SkipField__,
         }
         impl<'de> serde::Deserialize<'de> for GeneratedField {
@@ -5420,6 +5432,10 @@ impl<'de> serde::Deserialize<'de> for WelcomeMetadata {
                     {
                         match value {
                             "messageCursor" | "message_cursor" => Ok(GeneratedField::MessageCursor),
+                            "addedByInboxIsPendingRemove"
+                            | "added_by_inbox_is_pending_remove" => {
+                                Ok(GeneratedField::AddedByInboxIsPendingRemove)
+                            }
                             _ => Ok(GeneratedField::__SkipField__),
                         }
                     }
@@ -5440,6 +5456,7 @@ impl<'de> serde::Deserialize<'de> for WelcomeMetadata {
                     V: serde::de::MapAccess<'de>,
             {
                 let mut message_cursor__ = None;
+                let mut added_by_inbox_is_pending_remove__ = None;
                 while let Some(k) = map_.next_key()? {
                     match k {
                         GeneratedField::MessageCursor => {
@@ -5450,6 +5467,14 @@ impl<'de> serde::Deserialize<'de> for WelcomeMetadata {
                                 Some(map_.next_value::<::pbjson::private::NumberDeserialize<_>>()?.0)
                             ;
                         }
+                        GeneratedField::AddedByInboxIsPendingRemove => {
+                            if added_by_inbox_is_pending_remove__.is_some() {
+                                return Err(serde::de::Error::duplicate_field(
+                                    "addedByInboxIsPendingRemove",
+                                ));
+                            }
+                            added_by_inbox_is_pending_remove__ = Some(map_.next_value()?);
+                        }
                         GeneratedField::__SkipField__ => {
                             let _ = map_.next_value::<serde::de::IgnoredAny>()?;
                         }
@@ -5457,6 +5482,8 @@ impl<'de> serde::Deserialize<'de> for WelcomeMetadata {
                 }
                 Ok(WelcomeMetadata {
                     message_cursor: message_cursor__.unwrap_or_default(),
+                    added_by_inbox_is_pending_remove: added_by_inbox_is_pending_remove__
+                        .unwrap_or_default(),
                 })
             }
         }

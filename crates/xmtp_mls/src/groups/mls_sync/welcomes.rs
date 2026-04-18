@@ -16,9 +16,14 @@ where
         action: SendWelcomesAction,
         message_cursor: Option<i64>,
     ) -> Result<(), GroupError> {
+        let added_by_inbox_is_pending_remove = self
+            .context
+            .db()
+            .get_user_pending_remove_status(&self.group_id, self.context.inbox_id())?;
         // Only encode welcome metadata once
         let welcome_metadata = WelcomeMetadata {
             message_cursor: message_cursor.unwrap_or(0) as u64,
+            added_by_inbox_is_pending_remove,
         };
         let welcome_metadata_bytes = welcome_metadata.encode_to_vec();
 

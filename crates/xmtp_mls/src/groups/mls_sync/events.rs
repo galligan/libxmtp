@@ -1,8 +1,14 @@
+//! Deferred event emission for sync-side effects.
+//!
+//! Events are buffered until the surrounding transaction succeeds so consumers
+//! do not observe state changes that later roll back.
+
 use super::*;
 use crate::messages::decoded_message::DecodedMessage;
 use std::collections::VecDeque;
 use tokio::sync::broadcast;
 
+/// Channel access needed to flush deferred events after durable work commits.
 pub(crate) trait DeferredEventContext {
     fn worker_events(&self) -> &broadcast::Sender<SyncWorkerEvent>;
     fn local_events(&self) -> &broadcast::Sender<LocalEvents>;
@@ -21,7 +27,7 @@ where
     }
 }
 
-/// Collects events that should be sent after database transactions complete
+/// Collect events that should only become visible after database transactions commit.
 #[derive(Default)]
 pub(crate) struct DeferredEvents {
     worker_events: VecDeque<SyncWorkerEvent>,
@@ -45,7 +51,7 @@ impl DeferredEvents {
         self.local_events.push_back(event);
     }
 
-    /// Send all collected events to their respective channels
+    /// Flush all buffered events in FIFO order after durable state is committed.
     pub fn send_all<Context: DeferredEventContext>(&mut self, context: &Context) {
         while let Some(event) = self.worker_events.pop_front() {
             let _ = context.worker_events().send(event);
@@ -74,4 +80,59 @@ pub(super) fn emit_message_deleted_event<Context>(
         context,
         LocalEvents::MessageDeleted(Box::new(decoded_message)),
     );
+}
+
+impl<Context> MlsGroup<Context>
+where
+    Context: XmtpSharedContext,
+{
+    pub(super) fn log_processed_staged_commit(
+        &self,
+        mls_group: &OpenMlsGroup,
+        validated_commit: &ValidatedCommit,
+        payload: &GroupUpdated,
+        cursor: Cursor,
+    ) {
+        log_event!(
+            Event::MLSProcessedStagedCommit,
+            self.context.installation_id(),
+            group_id = self.group_id,
+            epoch = mls_group.epoch().as_u64(),
+            epoch_auth = mls_group.epoch_authenticator().as_slice(),
+            actor_installation_id = validated_commit.actor.installation_id,
+            added_inboxes = $payload.added_inboxes,
+            removed_inboxes = $payload.removed_inboxes,
+            left_inboxes = $payload.left_inboxes,
+            metadata_changes = $payload.metadata_field_changes,
+            cursor = cursor.sequence_id,
+            originator = cursor.originator_id
+        );
+    }
+
+    /// Emit the local "new sync group message" worker event only after the DB confirms the group type.
+    pub(super) fn defer_sync_group_message_event_if_needed(
+        &self,
+        sender_inbox_id: &str,
+        storage: &impl XmtpMlsStorageProvider,
+        deferred_events: &mut DeferredEvents,
+    ) -> Result<(), GroupMessageProcessingError> {
+        if sender_inbox_id != self.context.inbox_id() {
+            return Ok(());
+        }
+
+        tracing::info!(
+            installation_id = hex::encode(self.context.installation_id()),
+            "new sync group message event"
+        );
+
+        if let Some(StoredGroup {
+            conversation_type: ConversationType::Sync,
+            ..
+        }) = storage.db().find_group(&self.group_id)?
+        {
+            deferred_events.add_worker_event(SyncWorkerEvent::NewSyncGroupMsg);
+        }
+
+        Ok(())
+    }
 }

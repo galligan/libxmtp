@@ -1063,10 +1063,9 @@ async fn test_out_of_order_sender_deletion_shows_correct_deleted_by() {
 #[xmtp_common::test(unwrap_try = true)]
 async fn test_stream_message_deletions_from_other_client() {
     use crate::utils::FullXmtpClient;
-    use parking_lot::Mutex;
     use std::sync::Arc;
     use std::time::Duration;
-    use tokio::sync::Notify;
+    use tokio::sync::mpsc;
     use xmtp_common::StreamHandle;
 
     tester!(alix);
@@ -1091,13 +1090,8 @@ async fn test_stream_message_deletions_from_other_client() {
     // Bo syncs to receive the message (needed so the original message is in Bo's DB)
     bo_group.sync().await?;
 
-    // Set up shared state for Bo's callback
-    let deleted_message: Arc<Mutex<Option<crate::messages::decoded_message::DecodedMessage>>> =
-        Arc::new(Mutex::new(None));
-    let notify = Arc::new(Notify::new());
-
-    let deleted_message_clone = deleted_message.clone();
-    let notify_clone = notify.clone();
+    // Capture every deletion callback so we can assert replay doesn't emit duplicates.
+    let (tx, mut rx) = mpsc::unbounded_channel();
 
     // Bo sets up the deletion stream with callback
     // (Bo will receive the deletion event when syncing, since alix sent it)
@@ -1105,8 +1099,7 @@ async fn test_stream_message_deletions_from_other_client() {
         Arc::new(bo.client.clone()),
         move |msg| {
             if let Ok(message) = msg {
-                *deleted_message_clone.lock() = Some(message);
-                notify_clone.notify_one();
+                let _ = tx.send(message);
             }
         },
     );
@@ -1122,17 +1115,22 @@ async fn test_stream_message_deletions_from_other_client() {
     bo_group.sync().await?;
 
     // Wait for callback to be called (5s timeout provides buffer for async processing)
-    xmtp_common::time::timeout(Duration::from_secs(5), notify.notified())
+    let deleted_message = xmtp_common::time::timeout(Duration::from_secs(5), rx.recv())
         .await
-        .expect("Timed out waiting for deletion callback");
+        .expect("Timed out waiting for deletion callback")
+        .expect("Deletion callback channel closed unexpectedly");
 
     // Verify the stream received the correct deleted message
-    let deleted_message = deleted_message
-        .lock()
-        .take()
-        .expect("No deleted message received");
     assert_eq!(deleted_message.metadata.id, message_id);
     assert_eq!(deleted_message.metadata.sender_inbox_id, alix.inbox_id());
+
+    // A replaying sync should not emit a second local deletion event for the same message.
+    bo_group.sync().await?;
+    let duplicate = xmtp_common::time::timeout(Duration::from_secs(1), rx.recv()).await;
+    assert!(
+        duplicate.is_err(),
+        "Repeated sync should not re-emit delete-message local events for already applied deletions"
+    );
 }
 
 /// Test that stream_message_deletions fires for self-deletions after publishing.
@@ -1141,10 +1139,9 @@ async fn test_stream_message_deletions_from_other_client() {
 #[xmtp_common::test(unwrap_try = true)]
 async fn test_stream_message_deletions_fires_for_self_after_publish() {
     use crate::utils::FullXmtpClient;
-    use parking_lot::Mutex;
     use std::sync::Arc;
     use std::time::Duration;
-    use tokio::sync::Notify;
+    use tokio::sync::mpsc;
     use xmtp_common::StreamHandle;
 
     tester!(alix);
@@ -1159,21 +1156,15 @@ async fn test_stream_message_deletions_fires_for_self_after_publish() {
         .send_message(&text_bytes, SendMessageOpts::default())
         .await?;
 
-    // Set up shared state for Alix's callback
-    let deleted_message: Arc<Mutex<Option<crate::messages::decoded_message::DecodedMessage>>> =
-        Arc::new(Mutex::new(None));
-    let notify = Arc::new(Notify::new());
-
-    let deleted_message_clone = deleted_message.clone();
-    let notify_clone = notify.clone();
+    // Capture every deletion callback so we can assert replay doesn't emit duplicates.
+    let (tx, mut rx) = mpsc::unbounded_channel();
 
     // Alix sets up the deletion stream with callback
     let mut handle = FullXmtpClient::stream_message_deletions_with_callback(
         Arc::new(alix.client.clone()),
         move |msg| {
             if let Ok(message) = msg {
-                *deleted_message_clone.lock() = Some(message);
-                notify_clone.notify_one();
+                let _ = tx.send(message);
             }
         },
     );
@@ -1189,23 +1180,22 @@ async fn test_stream_message_deletions_fires_for_self_after_publish() {
     alix_group.sync().await?;
 
     // Wait for the deletion event callback (5s timeout provides buffer for async processing)
-    let result = xmtp_common::time::timeout(Duration::from_secs(5), notify.notified()).await;
+    let received_msg = xmtp_common::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("stream_message_deletions should fire for self-deletions after publish")
+        .expect("Deletion callback channel closed unexpectedly");
 
-    // Verify the callback was called (self-deletions fire local events after network confirmation)
-    assert!(
-        result.is_ok(),
-        "stream_message_deletions should fire for self-deletions after publish"
-    );
-
-    // Verify the correct message was received
-    let received = deleted_message.lock();
-    assert!(
-        received.is_some(),
-        "Deletion event should be received for self-deletions"
-    );
-    let received_msg = received.as_ref().unwrap();
+    // Verify the correct message was received.
     assert_eq!(
         received_msg.metadata.id, message_id,
         "Deleted message ID should match"
+    );
+
+    // A replaying sync should not emit a second local deletion event for the same deletion.
+    alix_group.sync().await?;
+    let duplicate = xmtp_common::time::timeout(Duration::from_secs(1), rx.recv()).await;
+    assert!(
+        duplicate.is_err(),
+        "Repeated sync should not re-emit delete-message local events after self-delete replay"
     );
 }

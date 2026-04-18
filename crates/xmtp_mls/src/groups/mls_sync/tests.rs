@@ -1,9 +1,14 @@
 use super::*;
 use crate::{builder::ClientBuilder, utils::TestMlsGroup};
 use mockall::predicate::eq;
+use prost::Message;
 use std::sync::Arc;
 use xmtp_cryptography::utils::generate_local_wallet;
 use xmtp_db::mock::MockDbQuery;
+use xmtp_proto::xmtp::mls::message_contents::{
+    PlaintextEnvelope,
+    plaintext_envelope::{Content, V1},
+};
 
 /// This test is not reproducible in webassembly, b/c webassembly has only one thread.
 #[cfg_attr(
@@ -80,7 +85,7 @@ async fn hmac_keys_work_as_expected() {
 }
 
 #[test]
-fn send_failures_for_published_intents_revert_to_to_publish() {
+fn retryable_send_failures_for_published_intents_revert_to_to_publish() {
     let intent = StoredGroupIntent {
         id: 42,
         kind: IntentKind::SendMessage,
@@ -107,7 +112,50 @@ fn send_failures_for_published_intents_revert_to_to_publish() {
         .times(1)
         .returning(|_| Ok(()));
 
-    let result = handle_published_intent_send_failure(&db, &intent);
+    let result = handle_published_intent_send_failure(&db, &intent, true);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn non_retryable_send_failures_for_published_intents_mark_error() {
+    let mut encoded_envelope = Vec::new();
+    PlaintextEnvelope {
+        content: Some(Content::V1(V1 {
+            content: b"hello".to_vec(),
+            idempotency_key: "retryless-intent".to_string(),
+        })),
+    }
+    .encode(&mut encoded_envelope)
+    .unwrap();
+
+    let intent = StoredGroupIntent {
+        id: 42,
+        kind: IntentKind::SendMessage,
+        group_id: xmtp_common::rand_vec::<16>(),
+        data: SendMessageIntentData::new(encoded_envelope).into(),
+        state: IntentState::Published,
+        payload_hash: Some(xmtp_common::rand_vec::<32>()),
+        post_commit_data: None,
+        publish_attempts: 0,
+        staged_commit: None,
+        published_in_epoch: Some(7),
+        should_push: false,
+        sequence_id: None,
+        originator_id: None,
+    };
+
+    let expected_message_id = utils::id::calculate_message_id_for_intent(&intent).unwrap();
+    let expected_intent_id = intent.id;
+
+    let mut db = MockDbQuery::new();
+    db.expect_set_group_intent_error_and_fail_msg()
+        .withf(move |actual_intent, actual_id| {
+            actual_intent.id == expected_intent_id && *actual_id == expected_message_id
+        })
+        .times(1)
+        .returning(|_, _| Ok(()));
+
+    let result = handle_published_intent_send_failure(&db, &intent, false);
     assert!(result.is_ok());
 }
 

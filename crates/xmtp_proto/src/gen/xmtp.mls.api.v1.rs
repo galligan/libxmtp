@@ -184,6 +184,8 @@ impl ::prost::Name for WelcomeMessageInput {
 pub struct WelcomeMetadata {
     #[prost(uint64, tag = "1")]
     pub message_cursor: u64,
+    #[prost(bool, tag = "2")]
+    pub added_by_inbox_is_pending_remove: bool,
 }
 impl ::prost::Name for WelcomeMetadata {
     const NAME: &'static str = "WelcomeMetadata";

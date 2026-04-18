@@ -199,9 +199,55 @@ async fn test_spoofed_inbox_id() {
         .await?;
     group.send_welcomes(send_welcome_action, None).await?;
 
+    let welcome_cursor_before = bo.context.db().latest_cursor_for_id(
+        bo.context.installation_id(),
+        &[EntityKind::Welcome],
+        None,
+    )?;
+    let max_welcome_cursor_before = welcome_cursor_before
+        .values()
+        .copied()
+        .max()
+        .unwrap_or_default();
+
     // We want Bo to reject this welcome, because the inbox ID is spoofed
     tracing::info!("Bo is receiving now");
     let groups = bo.sync_welcomes().await?;
+    let welcome_cursor_after = bo.context.db().latest_cursor_for_id(
+        bo.context.installation_id(),
+        &[EntityKind::Welcome],
+        None,
+    )?;
+    let max_welcome_cursor_after = welcome_cursor_after
+        .values()
+        .copied()
+        .max()
+        .unwrap_or_default();
+
+    assert!(groups.is_empty());
+    assert!(
+        max_welcome_cursor_after > max_welcome_cursor_before,
+        "non-retryable welcome rejection should advance the welcome cursor"
+    );
+
+    let replay_groups = bo.sync_welcomes().await?;
+    let welcome_cursor_after_replay = bo.context.db().latest_cursor_for_id(
+        bo.context.installation_id(),
+        &[EntityKind::Welcome],
+        None,
+    )?;
+    let max_welcome_cursor_after_replay = welcome_cursor_after_replay
+        .values()
+        .copied()
+        .max()
+        .unwrap_or_default();
+
+    assert!(replay_groups.is_empty());
+    assert_eq!(
+        max_welcome_cursor_after_replay, max_welcome_cursor_after,
+        "replaying a failed-forever welcome should not keep advancing the cursor"
+    );
+
     if !groups.is_empty() {
         // Test is already failed if we reach this point, the rest of the test explores
         // how this can be abused

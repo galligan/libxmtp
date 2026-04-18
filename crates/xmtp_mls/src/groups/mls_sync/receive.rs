@@ -1,9 +1,85 @@
+//! Receive-phase coordination and error handling.
+//!
+//! The receive path favors preserving useful progress over failing fast: it
+//! records non-retryable failures, defers fork detection to the persistence
+//! layer, and only aborts the batch when retryable ordering guarantees are at
+//! risk.
+
 use super::*;
 
 impl<Context> MlsGroup<Context>
 where
     Context: XmtpSharedContext,
 {
+    /// Record best-effort bookkeeping for a non-retryable failure.
+    ///
+    /// Failing to persist this bookkeeping should not hide the original
+    /// processing error; at worst the same bad envelope may be observed again.
+    fn post_process_non_retryable_error_transaction<Provider>(
+        &self,
+        provider: &Provider,
+        mls_group: &OpenMlsGroup,
+        envelope: &xmtp_proto::types::GroupMessage,
+        error: &GroupMessageProcessingError,
+    ) -> Result<(), GroupMessageProcessingError>
+    where
+        Provider: MlsProviderExt,
+    {
+        let db = provider.key_store().db();
+
+        // TXN-EDGE: non-retryable cursor advancement + failed-commit accounting - co-location convenience
+        // TODO(rich): Add log_err! macro/trait for swallowing errors
+        if let Err(update_cursor_error) = self.maybe_update_cursor(&db, envelope) {
+            // We don't need to propagate the error if the cursor fails to update - the worst case is
+            // that the non-retriable error is processed again
+            tracing::error!(
+                "Error updating cursor for non-retriable error: {update_cursor_error:?}"
+            );
+        } else if envelope.is_commit()
+            && let Err(accounting_error) = mls_group.mark_failed_commit_logged(
+                provider,
+                envelope.sequence_id(),
+                envelope.message.epoch(),
+                error,
+            )
+        {
+            tracing::error!(
+                "Error inserting commit entry for failed commit: {}",
+                accounting_error
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Apply non-retryable bookkeeping only while the group remains active.
+    fn post_process_non_retryable_error(
+        &self,
+        mls_group: &OpenMlsGroup,
+        envelope: &xmtp_proto::types::GroupMessage,
+        error: &GroupMessageProcessingError,
+    ) {
+        // Do not update the cursor if you have been removed from the group - you may be readded
+        // later
+        if !error.is_retryable()
+            && mls_group.is_active()
+            && let Err(transaction_error) = self.context.mls_storage().transaction(|conn| {
+                let key_store = conn.key_store();
+                let provider = XmtpOpenMlsProviderRef::new(&key_store);
+                self.post_process_non_retryable_error_transaction(
+                    &provider, mls_group, envelope, error,
+                )
+            })
+        {
+            tracing::error!("Error post-processing non-retryable error: {transaction_error:?}");
+        }
+    }
+
+    /// Normalize post-processing for one envelope result.
+    ///
+    /// Successful applies prune deferred cleanup. Validation failures that
+    /// indicate an unsupported protocol version pause the group instead of
+    /// letting receive continue into guaranteed failures.
     pub(super) async fn post_process_message(
         &self,
         mls_group: &OpenMlsGroup,
@@ -39,36 +115,7 @@ where
                     e
                 );
 
-                // Do not update the cursor if you have been removed from the group - you may be readded
-                // later
-                if !e.is_retryable() && mls_group.is_active()
-                    && let Err(transaction_error) = self.context.mls_storage().transaction(|conn| {
-                    let storage = conn.key_store();
-                    let provider = XmtpOpenMlsProviderRef::new(&storage);
-                    // TXN-EDGE: non-retryable cursor advancement + failed-commit accounting - unresolved
-                    // TODO(rich): Add log_err! macro/trait for swallowing errors
-                    if let Err(update_cursor_error) =
-                        self.maybe_update_cursor(&storage.db(), envelope)
-                    {
-                        // We don't need to propagate the error if the cursor fails to update - the worst case is
-                        // that the non-retriable error is processed again
-                        tracing::error!("Error updating cursor for non-retriable error: {update_cursor_error:?}");
-                    } else if envelope.is_commit()
-                        && let Err(accounting_error) = mls_group.mark_failed_commit_logged(
-                        &provider,
-                        envelope.sequence_id(),
-                        envelope.message.epoch(),
-                        &e,
-                    ) {
-                        tracing::error!(
-                                "Error inserting commit entry for failed commit: {}",
-                                accounting_error
-                        );
-                    }
-                    Ok::<(), GroupMessageProcessingError>(())
-                }) {
-                    tracing::error!("Error post-processing non-retryable error: {transaction_error:?}");
-                };
+                self.post_process_non_retryable_error(mls_group, envelope, &e);
 
                 if let Err(accounting_error) = self
                     .process_group_message_error_for_fork_detection(
@@ -90,6 +137,10 @@ where
         Ok(message)
     }
 
+    /// Process a batch of queried messages in cursor order.
+    ///
+    /// Retryable failures stop the batch so later envelopes do not build on top
+    /// of missing causal history.
     #[cfg_attr(
         any(test, feature = "test-utils"),
         tracing::instrument(level = "info", skip_all, fields(who = %self.context.inbox_id()))
@@ -137,10 +188,11 @@ where
         summary
     }
 
-    /// Receive messages from the last cursor network and try to process each message
-    /// Return all the cursors of the messages we tried to process regardless
-    /// if they were successful or not. It is important to return _all_
-    /// cursor ids, so that streams do not unintentionally retry O(n^2) messages.
+    /// Query the network-backed store and process every fetched envelope.
+    ///
+    /// The summary intentionally includes every attempted cursor so streaming
+    /// callers can advance their own bookkeeping without re-fetching an
+    /// ever-growing prefix of already-seen messages.
     #[tracing::instrument(skip_all, level = "trace")]
     pub async fn receive(&self) -> Result<ProcessSummary, GroupError> {
         let messages = MlsStore::new(self.context.clone())

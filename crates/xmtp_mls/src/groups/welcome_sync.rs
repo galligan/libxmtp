@@ -435,6 +435,7 @@ mod tests {
             &welcome.tls_serialize_detached().unwrap(),
             &WelcomeMetadata {
                 message_cursor: message_cursor.unwrap_or(0),
+                added_by_inbox_is_pending_remove: false,
             }
             .encode_to_vec(),
             &public_key,
